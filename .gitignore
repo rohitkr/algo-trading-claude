@@ -6,7 +6,8 @@
 test.py
 
 # Local data (DuckDB is rebuilt by the downloaders), session token, reports, logs
-data/
+# data/
+data/.breeze_session.json
 reports/
 logs/
 *.duckdb

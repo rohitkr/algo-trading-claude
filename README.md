@@ -218,6 +218,17 @@ python3 scripts/verify_market_data.py --instruments SENSEX
 
 It reads DuckDB only and shows the earliest and latest timestamp, total candles, trading days, duplicates, missing and incomplete days, and the candle count and first/last bar of the first and latest trading day. The exit code is 0 when everything is clean.
 
+### Read candles (OHLCV) for a period
+
+```bash
+python3 scripts/show_candles.py --start 2025-08-01 --end 2025-08-01                          # one day of 1-minute bars
+python3 scripts/show_candles.py --start "2025-08-01 09:15" --end "2025-08-01 10:00"
+python3 scripts/show_candles.py --instrument BANKNIFTY --start 2025-08-01 --end 2025-08-31 --resample 1D
+python3 scripts/show_candles.py --start 2024-01-01 --end 2024-12-31 --resample 1h --tail 20 --csv nifty_2024_1h.csv
+```
+
+It reads DuckDB only (no API calls, no session needed). Dates are inclusive and times are IST. `--resample` builds bigger bars (`5min`, `15min`, `1h`, `1D`) from the stored 1-minute data. `--head`/`--tail` limit what is printed, and `--csv` saves the rows to a file.
+
 ### Resume after interruption or failure
 
 - **Ctrl+C, a crash or a closed laptop:** every finished batch is already committed. Run the same command again and it continues with whatever DuckDB is still missing. A batch that was mid-flight is simply fetched again; upserts make that safe.
@@ -389,7 +400,7 @@ trading_data/
     options.py          generic options downloader
 scripts/                command-line entry points (python3 scripts/<name>.py):
                           get_session_token.py, download_market_data.py (backfill + catch-up),
-                          verify_market_data.py, download_options.py, data_report.py, init_db.py,
+                          verify_market_data.py, show_candles.py, download_options.py, data_report.py, init_db.py,
                           daily_update.py (alias of download_market_data.py)
 tests/                  pytest suite (live tests opt-in)
 data/  logs/  reports/  generated locally, gitignored
