@@ -320,6 +320,25 @@ python3 scripts/paper_replay.py --hedge-width 200                 # replay signa
 
 Everything Zerodha-specific (Kite Connect login, NFO instruments, orders, basket margin, paper broker, executor) lives in [`zerodha/`](zerodha/README.md). Strategies talk to it only through the neutral `strategy_signals` package (`OrderIntent`, `OptionLeg`); `backtest/signals.py` converts backtest trades into intents. Nothing in `backtest/` or `trading_data/` imports `zerodha`, and `kiteconnect` is optional.
 
+## 7. Live trading engine (`live/`)
+
+`live/` runs the two strategies above on live data: ICICI Breeze for market data (Zerodha's free
+Personal plan has none) and Zerodha Kite for execution. The flow is
+Breeze → `MarketDataProvider` → `Strategy` → `RiskManager` → `ExecutionBroker` → Zerodha, and each
+part can be replaced on its own. The strategy rules are shared with the backtest
+(`backtest/rules.py`), both NAKED and HEDGED are selectable, and every risk limit comes from `.env`.
+Modes are BACKTEST (DuckDB replay), PAPER (default) and LIVE (**not wired yet**).
+
+```bash
+python3 -m live replay --start 2026-07-27 --end 2026-09-25 --parity   # live engine vs backtest on stored data
+python3 -m live run                                                    # PAPER trading for today
+python3 -m live squareoff                                              # emergency: flatten and stop
+```
+
+Architecture, configuration, Breeze/Zerodha requirements, PAPER/LIVE setup, risk settings,
+monitoring, reconciliation, emergency square-off and the pre-LIVE checklist are in
+[`live/README.md`](live/README.md).
+
 ## DuckDB
 
 - **File:** `data/market_data.duckdb` (gitignored). Every script creates the file and schema automatically on first use; `python3 scripts/init_db.py` does only that and prints the table sizes. No database server is needed.
@@ -403,7 +422,7 @@ ce = store.get_option_candles("NIFTY", expiry="2025-08-07", strike=24000, right=
 
 ```bash
 source venv/bin/activate
-python3 -m pytest -q tests zerodha/tests                          # unit tests, no network, no credentials
+python3 -m pytest -q tests zerodha/tests live/tests               # unit tests, no network, no credentials
 BREEZE_LIVE=1 python3 -m pytest tests/test_live_breeze.py -v      # optional live API checks (needs today's session)
 ```
 
@@ -431,10 +450,13 @@ trading_data/
   downloaders/
     market.py           generic market-data downloader: end-date resolution, missing-day planning, batches
     options.py          generic options downloader
-backtest/               data feed, strategies, hedged overlay, margin estimates, naked-vs-hedged comparison,
-                        trade -> OrderIntent conversion, trade/cost model, HTML report
-strategy_signals/       broker-agnostic OrderIntent / OptionLeg (no dependencies; the only strategy <-> broker contract)
-zerodha/                Kite Connect adapter: auth, instruments, orders, margin, paper broker, executor (+ its own tests)
+backtest/               data feed, strategies (rules in rules.py, shared with live/), hedged overlay, margin
+                        estimates, naked-vs-hedged comparison, trade -> OrderIntent conversion, cost model, report
+strategy_signals/       broker-agnostic OrderIntent / OptionLeg + ExecutionBroker/ExecutionResult (no dependencies;
+                        the only strategy <-> broker contract)
+zerodha/                Kite Connect adapter: auth, instruments, orders, margin, paper broker, executor,
+                        ExecutionBroker adapter (+ its own tests)
+live/                   live trading engine: strategies, risk, engine, state, audit, replay (+ README, tests)
 scripts/                command-line entry points (python3 scripts/<name>.py):
                           get_session_token.py, download_market_data.py (backfill + catch-up),
                           verify_market_data.py, show_candles.py, download_options.py, data_report.py, init_db.py,

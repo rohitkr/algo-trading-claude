@@ -190,6 +190,41 @@ class BreezeClient:
                         attempt, self.api.max_retries, req.describe(), start.date(), end.date(), wait, err)
             time.sleep(wait)
 
+    # -- quotes (live trading) ------------------------------------------------------
+    def get_quote(self, req: HistoricalRequest) -> dict | None:
+        """Latest quote (ltp, ltt, bid/ask...) for one instrument via get_quotes; None when Breeze has none.
+
+        Uses the same budget, throttle and retry rules as historical calls. For
+        options Breeze expects the expiry as ...T06:00:00.000Z.
+        """
+        if self._breeze is None:
+            raise BreezeError("BreezeClient.connect() has not been called")
+        params = {"stock_code": req.stock_code, "exchange_code": req.exchange, "product_type": req.product_type,
+                  "expiry_date": f"{req.expiry:%Y-%m-%d}T06:00:00.000Z" if req.expiry else "",
+                  "right": (req.right or "").lower(), "strike_price": req.params().get("strike_price", "")}
+        attempt = 0
+        while True:
+            attempt += 1
+            self.budget.acquire()
+            try:
+                resp = self._breeze.get_quotes(**params)
+                err = None
+            except Exception as exc:
+                resp, err = None, f"{type(exc).__name__}: {exc}"
+            if resp is not None:
+                success, error = resp.get("Success"), resp.get("Error")
+                if resp.get("Status") == 200 and isinstance(success, list):
+                    rows = [r for r in success if str(r.get("exchange_code", req.exchange)).upper() == req.exchange]
+                    return (rows or success or [None])[0]
+                if resp.get("Status") == 200 and not error:
+                    return None
+                err = f"status={resp.get('Status')} error={error}"
+                if error and any(k in str(error).lower() for k in ("session", "unauthor", "invalid user")):
+                    raise SessionExpiredError(f"Breeze session rejected: {error}")
+            if attempt > self.api.max_retries:
+                raise BreezeError(f"quote {req.describe()} failed after {attempt} attempts: {err}")
+            time.sleep(self.api.retry_backoff_seconds * (2 ** (attempt - 1)))
+
     # -- paginated fetch -----------------------------------------------------------
     def fetch_candles(self, req: HistoricalRequest, start: datetime, end: datetime) -> list[dict]:
         """All candles in [start, end].

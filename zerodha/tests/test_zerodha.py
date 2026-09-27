@@ -252,13 +252,13 @@ def test_entry_buys_hedge_first_and_exit_closes_it_last(book):
     assert rep.ok and [p.role for p in rep.plan] == ["HEDGE", "MAIN"]
     placed = [(e[2], e[3]) for e in broker.log if e[0] == "place"]
     assert placed == [("BUY", "NIFTY26O0624900PE"), ("SELL", "NIFTY26O0625100PE")]
-    assert broker.positions == {"NIFTY26O0624900PE": 325, "NIFTY26O0625100PE": -325}
+    assert broker.net == {"NIFTY26O0624900PE": 325, "NIFTY26O0625100PE": -325}
 
     rep = ex.handle(put_spread(action=Action.EXIT))
     assert rep.ok
     placed = [(e[2], e[3]) for e in broker.log if e[0] == "place"][2:]
     assert placed == [("BUY", "NIFTY26O0625100PE"), ("SELL", "NIFTY26O0624900PE")]
-    assert all(q == 0 for q in broker.positions.values()) and not ex.positions
+    assert all(q == 0 for q in broker.net.values()) and not ex.positions
 
 
 def test_rejected_hedge_means_no_short_is_sold(book):
@@ -272,7 +272,7 @@ def test_rejected_main_leg_unwinds_hedge(book):
     broker = PaperBroker(prices=prices(), reject_symbols={"NIFTY26O0625100PE"})
     rep = Executor(broker, book, cfg()).handle(put_spread())
     assert not rep.ok and len(rep.unwound) == 1 and rep.unwound[0].side == "SELL"
-    assert all(q == 0 for q in broker.positions.values())
+    assert all(q == 0 for q in broker.net.values())
 
 
 def test_failed_main_exit_keeps_hedge(book):
@@ -282,7 +282,7 @@ def test_failed_main_exit_keeps_hedge(book):
     broker.reject_symbols.add("NIFTY26O0625100PE")
     rep = ex.handle(put_spread(action=Action.EXIT))
     assert not rep.ok and "hedges kept open" in rep.message
-    assert broker.positions["NIFTY26O0624900PE"] == 325
+    assert broker.net["NIFTY26O0624900PE"] == 325
     assert [o.leg.role for o in ex.positions["P1"]] == [LegRole.MAIN, LegRole.HEDGE]
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 TERMINAL = {"COMPLETE", "REJECTED", "CANCELLED"}
+PriceFn = Callable[[list[str]], dict[str, float]]
 
 
 @dataclass(frozen=True)
@@ -48,14 +49,24 @@ class Broker(Protocol):
     def ltp(self, keys: list[str]) -> dict[str, float]: ...
     def basket_margin(self, reqs: list[OrderRequest]) -> float: ...
     def available_margin(self) -> float: ...
+    def positions(self) -> dict[str, int]: ...          # tradingsymbol -> net quantity (+long / -short)
+    def open_orders(self) -> list[dict]: ...
 
 
 class KiteBroker:
-    """Thin adapter over a kiteconnect.KiteConnect instance (injected, so tests can pass a fake)."""
-    VARIETY = "regular"
+    """Thin adapter over a kiteconnect.KiteConnect instance (injected, so tests can pass a fake).
 
-    def __init__(self, kite):
+    `price_fn` replaces kite.ltp for limit pricing: the Kite Personal (free) plan has
+    no market-quote API, so live trading passes prices from the market-data provider.
+    """
+    VARIETY = "regular"
+    OPEN_STATUSES = {"OPEN", "TRIGGER PENDING", "PUT ORDER REQ RECEIVED", "VALIDATION PENDING",
+                     "OPEN PENDING", "MODIFY PENDING", "MODIFY VALIDATION PENDING", "AMO REQ RECEIVED"}
+
+    def __init__(self, kite, price_fn: PriceFn | None = None, exchange: str = "NFO"):
         self.kite = kite
+        self.price_fn = price_fn
+        self.exchange = exchange
 
     def place_order(self, req: OrderRequest) -> str:
         kw = req.kite_params()
@@ -76,7 +87,20 @@ class KiteBroker:
                            float(last.get("average_price") or 0.0), last.get("status_message") or "")
 
     def ltp(self, keys: list[str]) -> dict[str, float]:
+        if self.price_fn is not None:
+            return self.price_fn(keys)
         return {k: float(v["last_price"]) for k, v in self.kite.ltp(keys).items()}
+
+    def positions(self) -> dict[str, int]:
+        """Net positions on the exchange segment (day + carried), from kite.positions()["net"]."""
+        out: dict[str, int] = {}
+        for p in self.kite.positions().get("net", []):
+            if p.get("exchange") == self.exchange:
+                out[p["tradingsymbol"]] = out.get(p["tradingsymbol"], 0) + int(p.get("quantity") or 0)
+        return out
+
+    def open_orders(self) -> list[dict]:
+        return [o for o in self.kite.orders() if o.get("status") in self.OPEN_STATUSES]
 
     def basket_margin(self, reqs: list[OrderRequest]) -> float:
         """Kite basket margin incl. spread benefit ('final' = after hedge offsets)."""
@@ -96,14 +120,18 @@ class PaperBroker:
     price when marketable (BUY limit >= price, SELL limit <= price), otherwise
     stay OPEN until modified. `prices` maps "NFO:SYMBOL" -> price; `price_fn`
     overrides it. `margin_fn` estimates basket margin (default: 0).
+    `slippage` (points per unit) makes fills worse by that much; `max_fill_qty`
+    caps what one order can fill, to simulate partial fills.
     """
     funds: float = 1_000_000.0
     prices: dict[str, float] = field(default_factory=dict)
     price_fn: Callable[[str], float] | None = None
     margin_fn: Callable[[list[OrderRequest]], float] | None = None
     reject_symbols: set[str] = field(default_factory=set)
+    slippage: float = 0.0
+    max_fill_qty: int | None = None
     orders: dict[str, dict] = field(default_factory=dict)
-    positions: dict[str, int] = field(default_factory=dict)      # tradingsymbol -> net qty (+long / -short)
+    net: dict[str, int] = field(default_factory=dict)            # tradingsymbol -> net qty (+long / -short)
     cash: float = 0.0                                            # premium received - paid
     log: list[tuple] = field(default_factory=list)
     _ids: itertools.count = field(default_factory=lambda: itertools.count(1))
@@ -119,12 +147,14 @@ class PaperBroker:
         px = self._price(f"{req.exchange}:{req.tradingsymbol}")
         limit = o["price"]
         marketable = req.order_type == "MARKET" or (limit >= px if req.side == "BUY" else limit <= px)
-        if not marketable:
+        if not marketable or o["filled"]:
             return
         sign = 1 if req.side == "BUY" else -1
-        self.positions[req.tradingsymbol] = self.positions.get(req.tradingsymbol, 0) + sign * o["quantity"]
-        self.cash -= sign * px * o["quantity"]
-        o.update(status="COMPLETE", filled=o["quantity"], avg=px)
+        px = round(px + sign * self.slippage, 2)
+        qty = o["quantity"] if self.max_fill_qty is None else min(o["quantity"], self.max_fill_qty)
+        self.net[req.tradingsymbol] = self.net.get(req.tradingsymbol, 0) + sign * qty
+        self.cash -= sign * px * qty
+        o.update(status="COMPLETE" if qty == o["quantity"] else "OPEN", filled=qty, avg=px)
 
     def place_order(self, req: OrderRequest) -> str:
         oid = f"P{next(self._ids)}"
@@ -165,3 +195,11 @@ class PaperBroker:
 
     def available_margin(self) -> float:
         return self.funds
+
+    def positions(self) -> dict[str, int]:
+        return {k: v for k, v in self.net.items() if v}
+
+    def open_orders(self) -> list[dict]:
+        return [{"order_id": oid, "tradingsymbol": o["req"].tradingsymbol, "status": o["status"],
+                 "quantity": o["quantity"], "filled_quantity": o["filled"]}
+                for oid, o in self.orders.items() if o["status"] == "OPEN"]

@@ -92,3 +92,25 @@ class InstrumentBook:
                 w.writeheader()
                 w.writerows(rows)
         return cls(rows)
+
+
+class SyntheticInstrumentBook(InstrumentBook):
+    """Paper/replay book: creates an instrument for any requested contract (no Kite login needed).
+
+    Symbols look like NIFTY260929P25100 (not Kite's real format); LIVE mode always uses
+    InstrumentBook.from_kite so real tradingsymbols, lot and tick sizes come from Zerodha.
+    """
+
+    def __init__(self, lot_size: int, tick_size: float = 0.05, exchange: str = "NFO"):
+        super().__init__([])
+        self.lot_size, self.tick_size, self.exchange = lot_size, tick_size, exchange
+
+    def option(self, underlying: str, expiry: date, strike: float, right: str) -> Instrument:
+        key = (underlying, expiry, float(strike), right)
+        if key not in self._by_key:
+            sym = f"{underlying}{expiry:%y%m%d}{right[0]}{float(strike):g}"
+            inst = Instrument(sym, underlying, expiry, float(strike), right, self.lot_size, self.tick_size,
+                              len(self._by_key) + 1, self.exchange)
+            self._by_key[key] = inst
+            self._by_symbol[sym] = inst
+        return self._by_key[key]

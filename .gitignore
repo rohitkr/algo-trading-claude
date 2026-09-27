@@ -10,6 +10,7 @@ test.py
 data/.breeze_session.json
 data/.kite_session.json
 data/kite_instruments_*.csv
+data/live/
 reports/
 logs/
 *.duckdb

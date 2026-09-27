@@ -20,6 +20,7 @@ To move this package to its own repo, copy `zerodha/` and `strategy_signals/`
 | `margin.py` | `check_margin`: Kite **basket** margin for all legs together (so the hedge benefit is applied) vs. available funds + buffer. `estimate_basket_margin` for paper mode. |
 | `executor.py` | `Executor.handle(intent)`: margin check, then legs in a safe order (below), position bookkeeping, idempotent by `intent_id`. |
 | `__main__.py` | `python3 -m zerodha login` / `status`. |
+| `execution.py` | `ZerodhaExecutionBroker`: the `strategy_signals.execution.ExecutionBroker` adapter the live engine (`live/`) uses, over `PaperBroker` (PAPER) or `KiteBroker`. `build_live_broker` refuses unless `TRADING_MODE=LIVE`, `ENABLE_LIVE_TRADING=true`, `KITE_DRY_RUN=0` and `--live` are all set (not wired into the engine yet). |
 
 ## Leg ordering (hedged positions)
 
