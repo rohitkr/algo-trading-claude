@@ -52,6 +52,7 @@ class RangeBreakoutParams:
     reentry: bool = True
     lots: int = 5                        # 5 x 65 = 325 qty
     one_position_at_a_time: bool = True
+    expiry_offset: int = 0               # 0 = nearest weekly expiry after the entry day, 1 = the one after, ...
 
 
 @dataclass
@@ -91,6 +92,8 @@ class RangeBreakoutSeller:
                 record["reason"] = "previous position still open"
                 continue
             expiry = feed.next_expiry(d, strictly_after=True)
+            for _ in range(p.expiry_offset):
+                expiry = feed.next_expiry(expiry, strictly_after=True)
             right = rules.breakout_right(direction)
             strike = rules.itm_strike(spot_px, right, p.itm_points, feed.profile.strike_step)
             days = feed.cal.trading_days(d, expiry)

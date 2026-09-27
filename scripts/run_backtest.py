@@ -20,7 +20,7 @@ from backtest.data import DataFeed
 from backtest.engine import metrics
 from backtest.hedged import HedgedStrategy, HedgeParams, combine_positions
 from backtest.report import write_html
-from backtest.strategies import RangeBreakoutSeller, ZeroDteStraddleSeller
+from backtest.strategies import RangeBreakoutParams, RangeBreakoutSeller, ZeroDteStraddleSeller
 from trading_data.app import bootstrap, connect_client, parse_date
 from trading_data.log import get_logger
 
@@ -34,6 +34,8 @@ def main() -> int:
     ap.add_argument("--offline", action="store_true", help="do not call Breeze for missing option data")
     ap.add_argument("--hedge-width", type=int, default=0,
                     help="buy a protective wing this many points further OTM per sold leg (0 = naked, the default)")
+    ap.add_argument("--expiry-offset", type=int, default=0,
+                    help="positional expiry: 0 = nearest weekly after the entry day (default), 1 = next week, 2 = ...")
     ap.add_argument("--out", help="HTML path (default reports/backtest_<start>_<end>.html)")
     args = ap.parse_args()
 
@@ -48,7 +50,7 @@ def main() -> int:
     feed.load_spot(start - timedelta(days=90), end)
     log.info("Backtest %s %s -> %s, capital %.0f", args.underlying, start, end, args.capital)
 
-    positional = RangeBreakoutSeller(feed)
+    positional = RangeBreakoutSeller(feed, RangeBreakoutParams(expiry_offset=args.expiry_offset))
     intraday = ZeroDteStraddleSeller(feed)
     if args.hedge_width:
         hedge = HedgeParams(wing_points=args.hedge_width)
@@ -64,7 +66,8 @@ def main() -> int:
         results.append((strat, trades, m))
 
     out = args.out or str(settings.paths.report_dir / f"backtest_{args.underlying.lower()}_{start}_{end}"
-                                                         f"{f'_hedged{args.hedge_width}' if args.hedge_width else ''}.html")
+                                                         f"{f'_hedged{args.hedge_width}' if args.hedge_width else ''}"
+                                                         f"{f'_exp{args.expiry_offset}' if args.expiry_offset else ''}.html")
     payload = write_html(out, args.underlying, start, end, args.capital, results)
     json_path = out.rsplit(".", 1)[0] + ".json"
     with open(json_path, "w") as fh:
