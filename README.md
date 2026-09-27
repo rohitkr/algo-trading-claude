@@ -287,6 +287,39 @@ python3 scripts/data_report.py --instruments NIFTY --options NIFTY BANKNIFTY
 
 It reads only DuckDB (no API calls) and reports, per instrument: trading days requested/downloaded/missing/incomplete, duplicates, out-of-session and weekend/holiday rows. Per options profile it reports expiries, contract counts by status, missing CE/PE pairs, entry-day failures and synthetic rows, plus API calls used today. Text and JSON copies go to `reports/`.
 
+## 5. Backtest (NIFTY option selling)
+
+```bash
+python3 scripts/run_backtest.py                                   # last 2 months of stored data
+python3 scripts/run_backtest.py --start 2026-07-27 --end 2026-09-25 --capital 1000000
+python3 scripts/run_backtest.py --offline                         # only option data already in DuckDB
+```
+
+Runs two strategies from `backtest/strategies.py` and writes `reports/backtest_<underlying>_<start>_<end>.html` (charts, stats, every trade) plus a `.json` with the same data:
+
+- **Positional range breakout:** a close above the 09:15–11:15 NIFTY range sells a 100-point ITM PUT, and a close below it sells a 100-point ITM CALL, on the next weekly expiry. The stop is 0.5% of NIFTY against the entry, with one re-entry at the entry level, and the position is held to expiry.
+- **0DTE ITM straddle:** on each expiry day it sells a 100-point ITM CALL and PUT, with a 30% premium stop per leg and one re-entry at cost, exiting at 15:15. The entry time is chosen walk-forward from the previous 8 expiry days.
+
+Sizing is 5 lots (325 qty) per leg. Charges use Indian F&O rates plus 0.5-point slippage per side. Every parameter is a dataclass field in `backtest/strategies.py` (`RangeBreakoutParams`, `ZeroDteParams`).
+
+Option contracts that the trades need are downloaded from Breeze on first use (only those days) and stored in `option_candles`, so re-runs are offline.
+
+### Hedged variants (credit spreads)
+
+Both strategies sell naked options. `backtest/hedged.py` wraps either one without changing it: same entries, exits, stops and re-entries, plus one bought wing per sold leg, N points further OTM (sold PUT K → bought PUT K−N, sold CALL K → bought CALL K+N). Wing prices are real Breeze candles, fetched on first use like the sold legs.
+
+```bash
+python3 scripts/run_backtest.py --hedge-width 200                 # HTML report for the hedged variant (default 0 = naked)
+python3 scripts/compare_hedged.py --widths 200 300                # naked vs hedged: reports/naked_vs_hedged.md + _metrics.csv
+python3 scripts/paper_replay.py --hedge-width 200                 # replay signals through zerodha/ with a paper broker
+```
+
+`compare_hedged.py` reports trades, net P&L, win rate, max drawdown, avg win/loss, profit factor, largest loss, estimated peak margin/capital (`backtest/margin.py`, SPAN + exposure approximation) and defined risk per trade.
+
+## 6. Zerodha execution (`zerodha/`)
+
+Everything Zerodha-specific (Kite Connect login, NFO instruments, orders, basket margin, paper broker, executor) lives in [`zerodha/`](zerodha/README.md). Strategies talk to it only through the neutral `strategy_signals` package (`OrderIntent`, `OptionLeg`); `backtest/signals.py` converts backtest trades into intents. Nothing in `backtest/` or `trading_data/` imports `zerodha`, and `kiteconnect` is optional.
+
 ## DuckDB
 
 - **File:** `data/market_data.duckdb` (gitignored). Every script creates the file and schema automatically on first use; `python3 scripts/init_db.py` does only that and prints the table sizes. No database server is needed.
@@ -370,7 +403,7 @@ ce = store.get_option_candles("NIFTY", expiry="2025-08-07", strike=24000, right=
 
 ```bash
 source venv/bin/activate
-python3 -m pytest -q                                              # unit tests, no network, no credentials
+python3 -m pytest -q tests zerodha/tests                          # unit tests, no network, no credentials
 BREEZE_LIVE=1 python3 -m pytest tests/test_live_breeze.py -v      # optional live API checks (needs today's session)
 ```
 
@@ -398,6 +431,10 @@ trading_data/
   downloaders/
     market.py           generic market-data downloader: end-date resolution, missing-day planning, batches
     options.py          generic options downloader
+backtest/               data feed, strategies, hedged overlay, margin estimates, naked-vs-hedged comparison,
+                        trade -> OrderIntent conversion, trade/cost model, HTML report
+strategy_signals/       broker-agnostic OrderIntent / OptionLeg (no dependencies; the only strategy <-> broker contract)
+zerodha/                Kite Connect adapter: auth, instruments, orders, margin, paper broker, executor (+ its own tests)
 scripts/                command-line entry points (python3 scripts/<name>.py):
                           get_session_token.py, download_market_data.py (backfill + catch-up),
                           verify_market_data.py, show_candles.py, download_options.py, data_report.py, init_db.py,

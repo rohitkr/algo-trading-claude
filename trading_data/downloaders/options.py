@@ -209,6 +209,31 @@ class OptionsDownloader:
         log.info("%s: %d rows over %d days%s", c.label, len(r.frame), len(days),
                  " (retry window)" if r.used_retry else "")
 
+    def ensure_contract_days(self, c: OptionContract, days: list[date], min_bars: int = 1) -> int:
+        """Targeted fetch: make sure DuckDB holds `c` on each of `days` (used by backtests).
+
+        Only days with fewer than `min_bars` stored bars are requested, as one window
+        (paged). Returns the number of rows written. Does not touch option_contracts,
+        which tracks the full pre-expiry downloads of `run()`.
+        """
+        if not days:
+            return 0
+        have = self.store.option_bar_counts(c, min(days), max(days), TIMEFRAME)
+        missing = [d for d in days if have.get(d, 0) < min_bars]
+        if not missing:
+            return 0
+        start = datetime.combine(min(missing), self.cal.market_open)
+        end = self.cal.session_bounds(max(missing))[1]
+        records = self.client.fetch_candles(self._request(c), start, end)
+        frame, _ = clean_candles(records_to_frame(records), self.cal, TIMEFRAME)
+        if frame.empty:
+            return 0
+        out = frame.assign(underlying=c.underlying, exchange=c.exchange, expiry=c.expiry, strike=c.strike,
+                           option_right=c.right, timeframe=TIMEFRAME)
+        out["volume"] = out["volume"].astype("Int64")
+        out["open_interest"] = out["open_interest"].astype("Int64")
+        return self.store.upsert_option_candles(out)
+
     # -- main loop -------------------------------------------------------------
     def contracts_to_fetch(self, plan: ExpiryPlan, retry_no_data: bool = False) -> tuple[list[OptionContract], int]:
         statuses = self.store.contract_statuses(self.p.underlying, self.p.exchange, plan.expiry, TIMEFRAME)

@@ -8,6 +8,8 @@ test.py
 # Local data (DuckDB is rebuilt by the downloaders), session token, reports, logs
 # data/
 data/.breeze_session.json
+data/.kite_session.json
+data/kite_instruments_*.csv
 reports/
 logs/
 *.duckdb

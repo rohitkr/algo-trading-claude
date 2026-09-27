@@ -328,6 +328,14 @@ class CandleStore:
                 "AND strike = ? AND option_right = ? AND timeframe = ?",
                 [c.underlying, c.exchange, c.expiry, c.strike, c.right, timeframe]).fetchone()[0]
 
+    def option_bar_counts(self, c: OptionContract, start: date, end: date,
+                          timeframe: str = "1minute") -> dict[date, int]:
+        df = self.query_df(
+            "SELECT CAST(ts AS DATE) AS d, count(*) AS n FROM option_candles WHERE underlying = ? AND exchange = ? "
+            "AND expiry = ? AND strike = ? AND option_right = ? AND timeframe = ? AND ts >= ? AND ts < ? + INTERVAL 1 DAY "
+            "GROUP BY 1", [c.underlying, c.exchange, c.expiry, c.strike, c.right, timeframe, start, end])
+        return {_to_date(r.d): int(r.n) for r in df.itertuples()}
+
     def get_option_candles(self, underlying: str, expiry, strike: float, right: str,
                            timeframe: str = "1minute", start=None, end=None,
                            exchange: str | None = None, include_synthetic: bool = False) -> pd.DataFrame:

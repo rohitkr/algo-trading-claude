@@ -5,5 +5,8 @@ duckdb>=1.1                # embedded canonical data store
 python-dotenv>=1.0         # loads .env
 playwright>=1.47           # browser automation for the Breeze login + OTP flow
 
+# Optional: live Zerodha execution (zerodha/ imports it lazily; paper mode and tests do not need it)
+# kiteconnect>=5.0
+
 # Tests
 pytest>=8.0
