@@ -1,0 +1,208 @@
+# ---------------------------------------------------------------------------
+# Central configuration for the Breeze -> DuckDB data pipeline.
+#
+# Everything instrument-, exchange- or API-specific lives here, not in code.
+# Secrets never go in this file: they come from .env (see .env.example).
+# Paths are relative to the repository root.
+# ---------------------------------------------------------------------------
+
+[paths]
+database     = "data/market_data.duckdb"   # canonical store (created automatically)
+session_file = "data/.breeze_session.json" # today's Breeze session token (gitignored)
+log_dir      = "logs"
+report_dir   = "reports"
+
+# ---------------------------------------------------------------------------
+# Breeze API behaviour. Every API call goes through one client that enforces
+# these limits and records usage in DuckDB, so the limit is shared by all
+# scripts run on the same day.
+# ---------------------------------------------------------------------------
+[api]
+daily_limit            = 4900  # hard stop; Breeze allows 5000/day
+max_calls_per_minute   = 100   # Breeze documented per-minute limit
+delay_seconds          = 0.5   # pause after each call, per worker thread
+max_rows_per_request   = 1000  # historical_data_v2 returns at most 1000 candles (latest first); client pages backwards
+max_retries            = 3     # retries for network / transient errors (each retry counts as an API call)
+retry_backoff_seconds  = 2.0   # exponential backoff base
+timeout_seconds        = 30
+
+# ---------------------------------------------------------------------------
+# Trading calendars. Holidays live in config/holidays.toml keyed by calendar.
+# market_close is the start time of the LAST 1-minute candle (09:15..15:29 = 375 bars).
+# ---------------------------------------------------------------------------
+[calendars.NSE]
+market_open  = "09:15"
+market_close = "15:29"
+
+[calendars.BSE]
+market_open  = "09:15"
+market_close = "15:29"
+holidays_from = "NSE"   # BSE currently shares the NSE equity/F&O holiday list
+
+# ---------------------------------------------------------------------------
+# Underlying / index market data (cash segment).
+# ---------------------------------------------------------------------------
+[market_data]
+# Defaults for scripts/download_market_data.py. MARKET_DATA_* in .env override them.
+timeframe             = "1minute"      # MARKET_DATA_INTERVAL
+instruments           = ["NIFTY"]      # MARKET_DATA_INSTRUMENT (comma-separated for several)
+start_date            = "2023-09-27"   # MARKET_DATA_START_DATE: ~3 years of NIFTY for the initial backfill
+end_date              = "today"        # MARKET_DATA_END_DATE: "today" = keep up to the last finished session
+expected_bars_per_day = 375            # 09:15 -> 15:29 at 1 minute
+min_bars_threshold    = 370            # fewer bars than this = incomplete day
+max_attempts_per_day  = 3              # stop re-requesting a day that keeps coming back empty/incomplete
+chunk_days            = 7              # calendar days fetched + committed per unit (legacy SPOT_CHUNK_DAYS)
+# The current day is only downloaded once this time (IST) has passed.
+day_complete_after    = "15:45"
+
+# Instrument registry: logical name -> how Breeze identifies it.
+# stock_code values were checked against Breeze's SecurityMaster and live API on 2026-09-27.
+[instruments.NIFTY]
+stock_code   = "NIFTY"
+exchange     = "NSE"
+product_type = "cash"
+calendar     = "NSE"
+
+[instruments.BANKNIFTY]
+stock_code   = "CNXBAN"
+exchange     = "NSE"
+product_type = "cash"
+calendar     = "NSE"
+
+[instruments.FINNIFTY]
+stock_code   = "NIFFIN"
+exchange     = "NSE"
+product_type = "cash"
+calendar     = "NSE"
+
+[instruments.MIDCPNIFTY]
+stock_code   = "NIFSEL"
+exchange     = "NSE"
+product_type = "cash"
+calendar     = "NSE"
+
+[instruments.SENSEX]
+stock_code   = "BSESEN"
+exchange     = "BSE"
+product_type = "cash"
+calendar     = "BSE"
+
+# NOT VERIFIED: Breeze returned no data for NIF500 / NIFTY500 / "NIFTY 500".
+# Find the right code (ICICI "ShortName") and set it here before using NIFTY500.
+[instruments.NIFTY500]
+stock_code   = "NIF500"
+exchange     = "NSE"
+product_type = "cash"
+calendar     = "NSE"
+verified     = false
+
+# ---------------------------------------------------------------------------
+# Options profiles: one per option underlying. The same generic downloader
+# runs every profile. `underlying` refers to an [instruments.*] entry and is
+# used for spot/ATM data.
+#
+# expiry_rules: ordered segments. frequency = "weekly" (every <weekday>) or
+# "monthly" (last <weekday> of the month). A segment applies to expiries whose
+# unadjusted date falls in [from, until]. Holiday expiries move back to the
+# previous trading day.
+# ---------------------------------------------------------------------------
+[options.NIFTY]
+underlying            = "NIFTY"
+stock_code            = "NIFTY"
+exchange              = "NFO"
+product_type          = "options"
+calendar              = "NSE"
+expiry_start          = "2025-08-01"  # overridden by EXPIRY_START in .env
+expiry_end            = "2025-08-10"  # overridden by EXPIRY_END in .env
+strike_step           = 50
+strikes_each_side     = 20
+days_before_expiry    = 45
+lot_size              = 65
+max_threads           = 3
+api_delay             = 0.5
+daily_api_limit       = 4900
+dynamic_strike_buffer = 500
+dynamic_strike_round  = 100    # spot min/max rounded to this before applying the buffer
+retry_last_days       = 10     # empty contract -> retry (expiry - 10 days) -> expiry
+atm_reference         = "previous_expiry"  # ATM = open of the previous expiry day (the entry day)
+forward_fill          = false  # legacy fill-to-375 bars; opt-in, written to a separate synthetic table
+expiry_rules = [
+  { frequency = "weekly", weekday = "THU", until = "2025-08-31" },
+  { frequency = "weekly", weekday = "TUE", from  = "2025-09-01" },
+]
+
+[options.BANKNIFTY]
+underlying            = "BANKNIFTY"
+stock_code            = "CNXBAN"
+exchange              = "NFO"
+product_type          = "options"
+calendar              = "NSE"
+expiry_start          = "2025-08-01"
+expiry_end            = "2025-08-31"
+strike_step           = 100
+strikes_each_side     = 20
+days_before_expiry    = 45
+lot_size              = 30
+max_threads           = 3
+api_delay             = 0.5
+daily_api_limit       = 4900
+dynamic_strike_buffer = 1000
+dynamic_strike_round  = 100
+retry_last_days       = 10
+atm_reference         = "previous_expiry"
+forward_fill          = false
+# BANKNIFTY weeklies were discontinued in Nov 2024; monthly only since then.
+expiry_rules = [
+  { frequency = "monthly", weekday = "THU", from = "2024-12-01", until = "2025-08-31" },
+  { frequency = "monthly", weekday = "TUE", from = "2025-09-01" },
+]
+
+[options.FINNIFTY]
+underlying            = "FINNIFTY"
+stock_code            = "NIFFIN"
+exchange              = "NFO"
+product_type          = "options"
+calendar              = "NSE"
+expiry_start          = "2025-08-01"
+expiry_end            = "2025-08-31"
+strike_step           = 50
+strikes_each_side     = 20
+days_before_expiry    = 45
+lot_size              = 60
+max_threads           = 3
+api_delay             = 0.5
+daily_api_limit       = 4900
+dynamic_strike_buffer = 500
+dynamic_strike_round  = 100
+retry_last_days       = 10
+atm_reference         = "previous_expiry"
+forward_fill          = false
+expiry_rules = [
+  { frequency = "monthly", weekday = "THU", from = "2024-12-01", until = "2025-08-31" },
+  { frequency = "monthly", weekday = "TUE", from = "2025-09-01" },
+]
+
+[options.SENSEX]
+underlying            = "SENSEX"
+stock_code            = "BSESEN"
+exchange              = "BFO"
+product_type          = "options"
+calendar              = "BSE"
+expiry_start          = "2025-09-01"
+expiry_end            = "2025-09-30"
+strike_step           = 100
+strikes_each_side     = 20
+days_before_expiry    = 45
+lot_size              = 20
+max_threads           = 3
+api_delay             = 0.5
+daily_api_limit       = 4900
+dynamic_strike_buffer = 1500
+dynamic_strike_round  = 100
+retry_last_days       = 10
+atm_reference         = "previous_expiry"
+forward_fill          = false
+expiry_rules = [
+  { frequency = "weekly", weekday = "TUE", from = "2025-01-01", until = "2025-08-31" },
+  { frequency = "weekly", weekday = "THU", from = "2025-09-01" },
+]
