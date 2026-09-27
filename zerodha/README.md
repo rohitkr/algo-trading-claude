@@ -40,6 +40,7 @@ Add to `.env` (never commit it):
 ```
 KITE_API_KEY=...
 KITE_API_SECRET=...
+KITE_REDIRECT_URL=http://127.0.0.1:5678/kite/callback   # optional; this is the default
 KITE_DRY_RUN=1          # 0 sends real orders
 KITE_PRODUCT=NRML       # NRML for positional, MIS for intraday-only
 ```
@@ -47,14 +48,24 @@ KITE_PRODUCT=NRML       # NRML for positional, MIS for intraday-only
 Other settings (all optional) are documented at the top of `config.py`:
 `KITE_ORDER_TYPE`, `KITE_LIMIT_BUFFER_PCT`, `KITE_FREEZE_QTY` (check NSE's current
 NIFTY freeze limit), `KITE_FILL_TIMEOUT_S`, `KITE_MAX_REPRICES`,
-`KITE_MARGIN_BUFFER_PCT`, `KITE_TAG`, `KITE_TOKEN_FILE`, `KITE_ACCESS_TOKEN`.
+`KITE_MARGIN_BUFFER_PCT`, `KITE_TAG`, `KITE_TOKEN_FILE`, `KITE_ACCESS_TOKEN`, `KITE_REDIRECT_URL`.
+
+In the Kite developer console (developers.kite.trade → your app → **Redirect URL**) set
+exactly the same URL as `KITE_REDIRECT_URL`, by default `http://127.0.0.1:5678/kite/callback`.
 
 Daily login (Kite has no password API; you log in in the browser):
 
 ```bash
-python3 -m zerodha login     # open the URL, log in, paste the redirect URL back
+python3 -m zerodha login     # opens the browser; after you log in the redirect is caught automatically
 python3 -m zerodha status    # token valid? available margin
 ```
+
+`login` starts a one-shot HTTP listener on `KITE_REDIRECT_URL` (stdlib only), opens the
+Kite login page, reads `request_token` from the redirect (only if `status=success`), shows
+"Login complete" in the tab and exchanges the token for the day's access token. If the port
+can't be bound, the URL isn't a local `http://127.0.0.1` one, or nothing arrives within
+`--timeout` seconds (default 180), it falls back to pasting the redirect URL.
+Options: `--manual` (always paste), `--no-browser` (print the URL only), `--timeout N`.
 
 ## Use
 

@@ -16,7 +16,9 @@ from strategy_signals import Action, LegRole, OptionLeg, OrderIntent  # noqa: E4
 from zerodha import (Executor, InstrumentBook, KiteBroker, OrderManager, OrderRequest, PaperBroker,  # noqa: E402
                      ZerodhaConfig, estimate_basket_margin)
 from zerodha.auth import (IST, KiteSession, LoginRequired, access_token, exchange_request_token,  # noqa: E402
-                          extract_request_token, load_session, login_url, save_session)
+                          extract_request_token, load_session, login_url, parse_callback, redirect_endpoint,
+                          save_session, start_callback_server, wait_for_request_token)
+from zerodha.config import DEFAULT_REDIRECT_URL, read_env_file  # noqa: E402
 from zerodha.orders import OrderFailed, round_to_tick, slice_quantity  # noqa: E402
 
 EXP = date(2026, 10, 6)
@@ -73,6 +75,26 @@ def test_config_from_env_and_validation(tmp_path):
         ZerodhaConfig(product="CNC")
 
 
+def test_env_file_inline_comments(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("KITE_PRODUCT=NRML       # NRML for positional, MIS for intraday-only\n"
+                 "KITE_DRY_RUN=0\t# 0 sends real orders\n"
+                 'KITE_API_SECRET="se#cret"   # quoted keeps #\n'
+                 "KITE_TAG='a # b'\n"
+                 "KITE_API_KEY=ab#c\n"
+                 "KITE_ACCESS_TOKEN=#only-comment\n")
+    env = read_env_file(f)
+    assert env["KITE_PRODUCT"] == "NRML" and env["KITE_DRY_RUN"] == "0"
+    assert env["KITE_API_SECRET"] == "se#cret" and env["KITE_TAG"] == "a # b"
+    assert env["KITE_API_KEY"] == "ab#c" and env["KITE_ACCESS_TOKEN"] == ""
+    c = ZerodhaConfig.from_env(environ={}, env_file=f)
+    assert (c.product, c.dry_run, c.api_secret) == ("NRML", False, "se#cret")
+    # a polluted shell variable (overrides .env) is cleaned the same way
+    c = ZerodhaConfig.from_env(environ={"KITE_PRODUCT": "MIS # NRML FOR POSITIONAL", "KITE_DRY_RUN": " 1 "},
+                               env_file=f)
+    assert (c.product, c.dry_run) == ("MIS", True)
+
+
 def test_login_url_and_request_token():
     assert login_url(cfg()) == "https://kite.zerodha.com/connect/login?v=3&api_key=k"
     assert extract_request_token("http://localhost:3000/?action=login&type=login&status=success&request_token=RT1") == "RT1"
@@ -100,6 +122,72 @@ def test_session_expiry_and_storage(tmp_path):
     with pytest.raises(LoginRequired):
         access_token(c, now=created + timedelta(days=1))
     assert access_token(cfg(access_token="env-tok")) == "env-tok"
+
+
+def test_redirect_url_config_and_endpoint():
+    assert ZerodhaConfig.from_env(environ={}, env_file=None).redirect_url == DEFAULT_REDIRECT_URL
+    assert redirect_endpoint(DEFAULT_REDIRECT_URL) == ("127.0.0.1", 5678, "/kite/callback")
+    c = ZerodhaConfig.from_env(environ={"KITE_REDIRECT_URL": "http://127.0.0.1:9000/"}, env_file=None)
+    assert redirect_endpoint(c.redirect_url) == ("127.0.0.1", 9000, "/")
+    for bad in ("https://127.0.0.1:5678/cb", "http://example.com:5678/cb"):
+        with pytest.raises(ValueError):
+            redirect_endpoint(bad)
+
+
+def test_parse_callback():
+    ok = "/kite/callback?action=login&type=login&status=success&request_token=RT9"
+    assert parse_callback(ok, "/kite/callback") == ("RT9", None)
+    assert parse_callback("/kite/callback/?status=success&request_token=RT9", "/kite/callback") == ("RT9", None)
+    assert parse_callback("/favicon.ico", "/kite/callback") == (None, None)
+    tok, err = parse_callback("/kite/callback?status=cancelled&request_token=x", "/kite/callback")
+    assert tok is None and "cancelled" in err
+    assert parse_callback("/kite/callback?status=success", "/kite/callback")[1] == "redirect had no request_token"
+
+
+def _serve_one(url, request_path):
+    import threading
+    import urllib.error
+    import urllib.request
+    srv = start_callback_server(url)
+    port = srv.server_address[1]
+    out = {}
+    t = threading.Thread(target=lambda: out.update(r=_try(lambda: wait_for_request_token(srv, 5))))
+    t.start()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/favicon.ico", timeout=5)
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{request_path}", timeout=5) as resp:
+            out["page"] = (resp.status, resp.read().decode())
+    except urllib.error.HTTPError as e:
+        out["page"] = (e.code, e.read().decode())
+    t.join(5)
+    return out
+
+
+def _try(fn):
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 - surfaced to the test
+        return exc
+
+
+def test_callback_server_catches_token():
+    out = _serve_one("http://127.0.0.1:0/kite/callback", "/kite/callback?status=success&request_token=RTX")
+    assert out["r"] == "RTX"
+    assert out["page"][0] == 200 and "Login complete" in out["page"][1]
+
+
+def test_callback_server_reports_failed_login():
+    out = _serve_one("http://127.0.0.1:0/kite/callback", "/kite/callback?status=error&request_token=x")
+    assert isinstance(out["r"], ValueError) and out["page"][0] == 400
+
+
+def test_callback_server_times_out():
+    srv = start_callback_server("http://127.0.0.1:0/kite/callback")
+    ticks = iter([0.0, 0.0, 10.0])
+    assert wait_for_request_token(srv, timeout_s=1, clock=lambda: next(ticks)) is None
 
 
 def test_exchange_request_token_with_fake_kite():

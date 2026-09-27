@@ -5,15 +5,24 @@ redirects to the app's redirect URL with ?request_token=..., and that token is
 exchanged (with the API secret) for an access token. Access tokens expire at
 06:00 IST the next day, so this runs once per trading day:
 
-    python3 -m zerodha login          # prints the URL, asks for the redirect URL, saves the token
+    python3 -m zerodha login          # opens the browser, catches the redirect locally, saves the token
+
+`login` listens on KITE_REDIRECT_URL (default http://127.0.0.1:5678/kite/callback, which
+must also be the Redirect URL of the app on developers.kite.trade) with a one-shot stdlib
+HTTP server. If it cannot bind, the URL is not a local http one, or nobody logs in before
+the timeout, it falls back to pasting the redirect URL into the terminal.
 """
 from __future__ import annotations
 
+import html
 import json
 import os
+import time as _time
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from .config import ZerodhaConfig
@@ -58,6 +67,99 @@ def extract_request_token(redirect_url_or_token: str) -> str:
     if q.get("status", ["success"])[0] != "success":
         raise ValueError(f"login did not succeed: status={q.get('status')}")
     return q["request_token"][0]
+
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def redirect_endpoint(redirect_url: str) -> tuple[str, int, str]:
+    """(host, port, path) to listen on for KITE_REDIRECT_URL; ValueError unless it is a local http:// URL."""
+    u = urlparse(redirect_url.strip())
+    if u.scheme != "http":
+        raise ValueError(f"KITE_REDIRECT_URL must be http:// to be caught locally, got {redirect_url!r}")
+    if u.hostname not in LOOPBACK_HOSTS:
+        raise ValueError(f"KITE_REDIRECT_URL host must be 127.0.0.1 (loopback), got {u.hostname!r}")
+    return u.hostname, (80 if u.port is None else u.port), u.path or "/"
+
+
+def parse_callback(request_path: str, expected_path: str) -> tuple[str | None, str | None]:
+    """Parse one callback request. Returns (request_token, error); both None = not our path (ignore)."""
+    u = urlparse(request_path)
+    if (u.path.rstrip("/") or "/") != (expected_path.rstrip("/") or "/"):
+        return None, None
+    q = parse_qs(u.query)
+    status = q.get("status", [""])[0]
+    token = q.get("request_token", [""])[0]
+    if status != "success":
+        return None, f"login did not succeed: status={status or '(missing)'}"
+    if not token:
+        return None, "redirect had no request_token"
+    return token, None
+
+
+_PAGE = ("<!doctype html><meta charset=utf-8><title>Kite login</title>"
+         "<body style='font-family:sans-serif;margin:3em'><h2>{title}</h2><p>{body}</p></body>")
+
+
+class _CallbackServer(HTTPServer):
+    expected_path = "/"
+    request_token: str | None = None
+    error: str | None = None
+
+
+class _CallbackHandler(BaseHTTPRequestHandler):
+    server: _CallbackServer
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        token, error = parse_callback(self.path, self.server.expected_path)
+        if token is None and error is None:
+            self._reply(404, "Not found", "This is the Kite login callback listener.")
+            return
+        if token:
+            self.server.request_token = token
+            self._reply(200, "Login complete", "You can close this tab and return to the terminal.")
+        else:
+            self.server.error = error
+            self._reply(400, "Login failed", html.escape(error or ""))
+
+    def _reply(self, code: int, title: str, body: str) -> None:
+        data = _PAGE.format(title=title, body=body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt, *args):  # keep request_token out of the terminal
+        pass
+
+
+def start_callback_server(redirect_url: str) -> _CallbackServer:
+    """Bind the one-shot listener for KITE_REDIRECT_URL (ValueError / OSError when that is impossible)."""
+    host, port, path = redirect_endpoint(redirect_url)
+    srv = _CallbackServer((host, port), _CallbackHandler)
+    srv.expected_path = path
+    return srv
+
+
+def wait_for_request_token(srv: _CallbackServer, timeout_s: float = 180.0,
+                           clock: Callable[[], float] = _time.monotonic) -> str | None:
+    """Serve until the callback arrives or timeout_s passes; returns the token (None on timeout).
+    Raises ValueError if Kite redirected with a non-success status. Always closes the server."""
+    deadline = clock() + timeout_s
+    try:
+        while srv.request_token is None and srv.error is None:
+            left = deadline - clock()
+            if left <= 0:
+                return None
+            srv.timeout = min(left, 1.0)
+            srv.handle_request()
+    finally:
+        srv.server_close()
+    if srv.error:
+        raise ValueError(srv.error)
+    return srv.request_token
 
 
 def new_kite(cfg: ZerodhaConfig, access_token: str | None = None):
