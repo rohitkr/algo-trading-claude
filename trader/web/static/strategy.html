@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strategy Builder</title>
+<link rel="stylesheet" href="/static/strategy.css">
+</head>
+<body>
+<div id="banner" class="banner">Loading…</div>
+<div id="halt" class="halt hidden"></div>
+<header class="topbar">
+  <h1>Strategy Builder</h1>
+  <div class="topbar-right">
+    <a class="navlink" href="/">← Single trade</a>
+    <button type="button" id="theme-toggle" title="Switch light/dark">🌙</button>
+  </div>
+</header>
+
+<main>
+  <section class="panel" id="config-panel">
+    <h2>Global configuration</h2>
+
+    <div class="field-group">
+      <label class="group-label">Order type</label>
+      <span class="seg" id="order-type-seg">
+        <input type="radio" name="order_type" value="MIS" id="ot-mis" checked><label for="ot-mis">MIS</label>
+        <input type="radio" name="order_type" value="CNC" id="ot-cnc"><label for="ot-cnc">CNC</label>
+        <input type="radio" name="order_type" value="BTST" id="ot-btst"><label for="ot-btst">BTST</label>
+      </span>
+      <p class="hint small" id="order-type-hint"></p>
+    </div>
+
+    <div class="field-group">
+      <label class="group-label">Time settings (optional)</label>
+      <div class="grid3">
+        <label>Start time <input type="time" id="cfg-start-time" value="09:16"></label>
+        <label>Square off time <input type="time" id="cfg-square-off" value="15:10"></label>
+        <label>Days
+          <span class="days" id="days-seg">
+            <button type="button" data-day="MON" class="day on">MON</button>
+            <button type="button" data-day="TUE" class="day on">TUE</button>
+            <button type="button" data-day="WED" class="day on">WED</button>
+            <button type="button" data-day="THU" class="day on">THU</button>
+            <button type="button" data-day="FRI" class="day on">FRI</button>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label class="group-label">Risk management</label>
+      <div class="grid3">
+        <label>Exit when overall profit (₹) <input type="number" id="cfg-exit-profit" min="0" step="1" placeholder="off"></label>
+        <label>Exit when overall loss (₹) <input type="number" id="cfg-exit-loss" min="0" step="1" placeholder="off"></label>
+        <label>No trade after <input type="time" id="cfg-no-trade-after"></label>
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label class="group-label">Profit trailing</label>
+      <div class="radio-col" id="trail-mode">
+        <label><input type="radio" name="trailing_mode" value="NONE" checked> No trailing</label>
+        <label><input type="radio" name="trailing_mode" value="LOCK_FIX"> Lock fix profit</label>
+        <div class="conditional grid2ph" data-for="LOCK_FIX">
+          <input type="number" id="tr-lock-reaches" step="1" placeholder="If profit reaches (₹)">
+          <input type="number" id="tr-lock-at" step="1" placeholder="Lock profit at (₹)">
+        </div>
+        <label><input type="radio" name="trailing_mode" value="TRAIL"> Trail profit</label>
+        <div class="conditional grid2ph" data-for="TRAIL">
+          <input type="number" id="tr-trail-every" step="1" placeholder="On every increase of (₹)">
+          <input type="number" id="tr-trail-by" step="1" placeholder="Trail profit by (₹)">
+        </div>
+        <label><input type="radio" name="trailing_mode" value="LOCK_AND_TRAIL"> Lock and trail</label>
+        <div class="conditional grid2ph" data-for="LOCK_AND_TRAIL">
+          <input type="number" id="tr2-lock-reaches" step="1" placeholder="If profit reaches (₹)">
+          <input type="number" id="tr2-lock-at" step="1" placeholder="Lock profit at (₹)">
+          <input type="number" id="tr2-trail-every" step="1" placeholder="On every increase of (₹)">
+          <input type="number" id="tr2-trail-by" step="1" placeholder="Trail profit by (₹)">
+        </div>
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label class="group-label"><input type="checkbox" id="cfg-sl-cost-enabled"> Move SL to cost</label>
+      <p class="hint small">When a leg's own price moves this many points in its favour, its stop-loss is pulled to its entry price (breakeven). Applies to every leg.</p>
+      <label>When price reaches (points) <input type="number" id="cfg-sl-cost-at" step="0.05" min="0"></label>
+    </div>
+  </section>
+
+  <section class="panel wide" id="legs-panel">
+    <div class="panel-head">
+      <h2>Legs</h2>
+      <div class="templates">
+        <span class="hint small">Templates:</span>
+        <button type="button" class="tmpl-btn" data-tmpl="straddle">Short Straddle</button>
+        <button type="button" class="tmpl-btn" data-tmpl="strangle">Short Strangle</button>
+        <button type="button" class="tmpl-btn" data-tmpl="iron_condor">Iron Condor</button>
+        <button type="button" class="tmpl-btn" data-tmpl="iron_fly">Iron Fly</button>
+      </div>
+    </div>
+
+    <div class="spot-panel">
+      <div class="spot-symbol" id="base-spot-symbol">–</div>
+      <div class="spot-value" id="base-spot">–</div>
+      <button type="button" id="refresh-spot" title="Refresh spot price">↻ Spot</button>
+    </div>
+    <div class="grid3 base-select">
+      <label>Instrument <select id="base-underlying"></select></label>
+      <label>Expiry <select id="base-expiry"></select></label>
+    </div>
+
+    <div class="leg-table-wrap">
+      <table class="leg-table" id="leg-table">
+        <thead><tr>
+          <th></th><th>B/S</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Lots</th>
+          <th>Price <button type="button" id="refresh-prices" title="Refresh LTP for every leg">↻</button></th>
+          <th>SL</th><th>TP</th><th></th>
+        </tr></thead>
+        <tbody id="leg-tbody"></tbody>
+      </table>
+    </div>
+    <button type="button" id="add-leg">+ Add leg</button>
+
+    <div id="leg-summaries" class="leg-summaries"></div>
+
+    <div class="grid3 calc-row">
+      <div>Price get <output id="calc-price-get">–</output></div>
+      <div>Premium get <output id="calc-premium-get">–</output></div>
+      <div>Charges (est.) <output id="calc-charges">–</output></div>
+    </div>
+
+    <p id="form-hint" class="hint"></p>
+    <div class="action-row">
+      <button type="button" id="save-draft" class="ghost">Add to drafts</button>
+      <button type="button" id="trade-all" class="primary">Trade all</button>
+    </div>
+  </section>
+
+  <section class="panel wide" id="strategies-panel">
+    <h2>Active strategies</h2>
+    <div id="strategies-list"></div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlg-form">
+    <h2 id="dlg-title"></h2>
+    <div id="dlg-body"></div>
+    <p id="dlg-live" class="live-confirm hidden">● LIVE: this sends real orders to Zerodha.</p>
+    <menu><button value="cancel" id="dlg-cancel">Cancel</button> <button value="ok" id="dlg-ok" class="danger">Confirm</button></menu>
+  </form>
+</dialog>
+<script src="/static/strategy.js"></script>
+</body>
+</html>

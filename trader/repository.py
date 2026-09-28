@@ -93,11 +93,32 @@ CREATE TABLE IF NOT EXISTS trades (
     error               TEXT,
     reconcile_info      TEXT,                       -- JSON: last reconciliation finding
     notes               TEXT,
-    group_id            INTEGER,                    -- future multi-leg: the strategy group this leg belongs to
-    leg_role            TEXT                        -- future multi-leg: e.g. SHORT_CE / LONG_CE_WING
+    group_id            INTEGER,                    -- multi-leg: the strategies row this leg belongs to
+    leg_role            TEXT                        -- multi-leg: e.g. SHORT_CE / LONG_CE_WING
 );
 CREATE INDEX IF NOT EXISTS trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS trades_date ON trades(trade_date);
+CREATE INDEX IF NOT EXISTS trades_group ON trades(group_id);
+
+-- Multi-leg strategies (trader/strategy.py). Each member leg is an ordinary trades row (group_id = id
+-- here), managed exactly like any single trade: its own SL/target/trailing run unchanged. This table adds
+-- ONE more layer on top - the combined-P&L rules (exit_profit/exit_loss/trailing) - which acts by setting
+-- pending_exit_reason on member trades, the same field the single-trade engine already sets for its own
+-- exits, so a group exit is just the existing, tested per-trade exit path running on every leg.
+CREATE TABLE IF NOT EXISTS strategies (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode            TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'ACTIVE',      -- ACTIVE | DONE | CANCELLED
+    config          TEXT NOT NULL,                       -- JSON: GlobalConfig (see strategy.py)
+    best_pnl        REAL,                                -- highest combined P&L seen (profit trailing)
+    locked_pnl      REAL,                                -- current locked floor once trailing has engaged
+    exit_reason     TEXT,
+    exit_time       TEXT
+);
+CREATE INDEX IF NOT EXISTS strategies_status ON strategies(status);
 
 CREATE TABLE IF NOT EXISTS orders (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,7 +185,7 @@ CREATE TABLE IF NOT EXISTS system_status (key TEXT PRIMARY KEY, value TEXT, upda
 
 # Columns added after the first release: ALTERed into existing databases at start (additive only).
 ADDED_COLUMNS = {"trades": [("user_sl", "REAL"), ("group_id", "INTEGER"), ("leg_role", "TEXT"),
-                            ("kite_ltp", "REAL")],
+                            ("kite_ltp", "REAL"), ("order_type", "TEXT")],
                  "action_tokens": [("payload", "TEXT")]}
 
 TRADE_COLUMNS: set[str] = set()     # filled at first connect (PRAGMA table_info)
@@ -306,6 +327,37 @@ class Repository:
     def confirmed_on(self, day: date) -> int:
         return int(self.conn.execute("SELECT COUNT(*) FROM trades WHERE substr(confirmed_at,1,10)=?",
                                      (day.isoformat(),)).fetchone()[0])
+
+    def trades_by_group(self, group_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM trades WHERE group_id=? ORDER BY id", (group_id,))]
+
+    # -- strategies (multi-leg) --------------------------------------------------------------------
+    def insert_strategy(self, fields: dict) -> int:
+        now = self.now()
+        row = {"created_at": now, "updated_at": now, "status": "ACTIVE", **fields}
+        with self.tx() as c:
+            cur = c.execute(f"INSERT INTO strategies ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                            list(row.values()))
+            return int(cur.lastrowid)
+
+    def strategy(self, strategy_id: int) -> dict | None:
+        r = self.conn.execute("SELECT * FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+        return dict(r) if r else None
+
+    def strategies(self, status: str | Iterable[str] | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM strategies WHERE 1=1", []
+        if status is not None:
+            st = [status] if isinstance(status, str) else list(status)
+            sql += f" AND status IN ({', '.join('?' * len(st))})"
+            args += st
+        return [dict(r) for r in self.conn.execute(sql + " ORDER BY id DESC", args)]
+
+    def update_strategy(self, strategy_id: int, **fields) -> None:
+        fields = {**fields, "updated_at": self.now()}
+        with self.tx() as c:
+            c.execute(f"UPDATE strategies SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
+                      list(fields.values()) + [strategy_id])
 
     # -- orders ----------------------------------------------------------------------------------
     def new_tag(self, trade_id: int, kind: str) -> str:

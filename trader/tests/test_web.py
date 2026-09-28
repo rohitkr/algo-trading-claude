@@ -12,6 +12,7 @@ from trader import lifecycle as L
 from trader.app import App, AlreadyRunning, single_instance_lock
 from trader.broker import LiveTradingNotEnabled, build_broker
 from trader.config import TraderConfig
+from trader.strategy import StrategyService
 from trader.web.server import make_server
 
 from .fakes import EXPIRY
@@ -21,7 +22,7 @@ from .test_service import SYM, Rig
 @pytest.fixture
 def web(tmp_path):
     r = Rig(tmp_path, paper_quotes="manual")
-    app = App(r.cfg, r.svc, r.repo, r.ex, r.quotes, None)
+    app = App(r.cfg, r.svc, r.repo, r.ex, r.quotes, None, StrategyService(r.svc, r.repo))
     srv = make_server(app, _free_port())
     port = srv.server_address[1]
     th = threading.Thread(target=srv.serve_forever, daemon=True)

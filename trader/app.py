@@ -15,6 +15,7 @@ from .market import BreezeQuotes, ManualQuotes
 from .paper import PaperExchange
 from .repository import Repository
 from .service import TradeService
+from .strategy import StrategyService
 
 log = logging.getLogger("trader")
 
@@ -31,6 +32,7 @@ class App:
     paper: PaperExchange | None
     quotes: object
     lock_fh: object
+    strategies: StrategyService
 
 
 def single_instance_lock(db_path: Path):
@@ -84,7 +86,9 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist) -> App:
     from live.audit import AuditLog
     audit = AuditLog(cfg.audit_dir, cfg.mode, clock=clock, instance="trader")
     svc = TradeService(cfg, repo, broker, instruments, quotes, clock, audit_log=audit)
-    return App(cfg, svc, repo, paper, quotes, lock)
+    strategies = StrategyService(svc, repo)
+    svc.extra_tick = strategies.tick        # combined-P&L rules run right after the per-trade engine, every tick
+    return App(cfg, svc, repo, paper, quotes, lock, strategies)
 
 
 class _PublicInstruments:

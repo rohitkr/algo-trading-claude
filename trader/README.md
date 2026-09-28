@@ -127,7 +127,37 @@ database.
 - **Changes made in Kite:** a price or quantity changed directly in Kite, or an edit whose response
   was lost, is adopted from the order book (`ORDER_TERMS_FROM_BROKER`, `ENTRY_TERMS_SYNCED`).
 
-## Future: multi-leg (iron condor / iron fly), not implemented
+## Strategy Builder: multi-leg (Phase 1)
+
+`http://127.0.0.1:PORT/strategy` builds a multi-leg strategy (straddle, strangle, iron condor, iron fly,
+or a custom set of legs) and places every leg through the exact same `preview`/`confirm` API and SL/
+target/trailing engine a single manual trade uses (`trader/strategy.py`) - each leg is an ordinary
+`trades` row (`group_id` = the strategy), so per-leg crash recovery, reconciliation and idempotency are
+unchanged. On top of that, `StrategyService.tick()` (run every monitor tick, see `TradeService.extra_tick`)
+adds ONE more layer: combined-P&L rules across the group -
+
+- **Exit when overall profit/loss** reaches an amount, and **profit trailing** (lock a fixed floor once
+  profit reaches X, trail the floor as profit grows, or both) on the group's *combined* P&L.
+- **Move SL to cost**: once a leg has moved N points in its favour, its own stop is pulled to its entry
+  price (breakeven).
+
+Both act by setting `pending_exit_reason` on the affected leg(s) - the SAME field the single-trade
+engine's own SL/target/daily-limit exits already set - so the next tick's ordinary per-trade processing
+places the actual exit order. `StrategyService` itself never places, modifies or cancels a broker order.
+
+**Order type** (MIS | CNC | BTST) is a workflow label, not a Zerodha product: MIS -> product MIS; CNC and
+BTST both place as NRML (Zerodha has neither CNC nor BTST for F&O). BTST additionally makes
+`TradeService._time_exit_reason` skip the *global* `TRADER_SQUARE_OFF_TIME` for that trade, so it carries
+overnight; it is picked back up by this same engine on the next day's run exactly like any other open
+trade (trades already resume across restarts regardless of which day they were opened), until its own
+auto-exit time, SL, target or a manual exit closes it.
+
+**Not implemented yet** (see "Future: multi-leg" below, which this still is for the harder parts):
+broker-side atomic multi-leg entry (hedges first) or unwinding a partially-placed strategy, combined
+margin, backtesting, and saved/recurring/scheduled strategies - "Start time" and "days of week" in the
+builder are stored but not yet enforced (there is no scheduler; a strategy runs when you press Trade All).
+
+## Future: multi-leg (iron condor / iron fly), the parts Phase 1 above does not cover
 
 Plan, with the schema already prepared (`trades.group_id` and `trades.leg_role` exist, and additive
 column changes are applied automatically at start):

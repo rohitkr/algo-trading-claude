@@ -65,6 +65,8 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             try:
                 if u.path in ("/", "/index.html"):
                     return self._file("index.html")
+                if u.path in ("/strategy", "/strategy.html"):
+                    return self._file("strategy.html")
                 if u.path.startswith("/static/"):
                     return self._file(u.path[len("/static/"):])
                 if u.path == "/api/meta":
@@ -80,6 +82,12 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                                                            with_ltp=q.get("ltp") == "1"))
                 if u.path == "/api/spot":
                     return self._json(200, svc.spot(q["underlying"], with_ltp=q.get("ltp") == "1"))
+                if u.path == "/api/strategies":
+                    with svc.lock:
+                        return self._json(200, {"strategies": app.strategies.dashboard()})
+                m = re.fullmatch(r"/api/strategies/(\d+)", u.path)
+                if m:
+                    return self._json(200, {"strategy": app.strategies.view(int(m.group(1)))})
                 m = re.fullmatch(r"/api/trades/(\d+)", u.path)
                 if m:
                     tid = int(m.group(1))
@@ -140,6 +148,11 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path == "/api/resume":
                     svc.resume()
                     return self._json(200, {"ok": True})
+                if u.path == "/api/strategies/trade_all":
+                    return self._json(200, app.strategies.create_and_trade(body))
+                m = re.fullmatch(r"/api/strategies/(\d+)/exit", u.path)
+                if m:
+                    return self._json(200, app.strategies.exit_all(int(m.group(1))))
                 if u.path == "/api/paper/price":
                     if app.cfg.mode != "PAPER" or not hasattr(app.quotes, "set"):
                         return self._json(403, {"error": "manual prices exist only in PAPER with TRADER_PAPER_QUOTES=manual"})

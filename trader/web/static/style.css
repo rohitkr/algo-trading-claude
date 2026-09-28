@@ -57,3 +57,6 @@ dialog table td:first-child { color:var(--muted); }
 .live-confirm { color:var(--live); font-weight:600; }
 .hidden { display:none !important; }
 pre { white-space:pre-wrap; font-size:12px; }
+.subnav { padding:8px 16px; background:var(--card); border-bottom:1px solid var(--line); }
+.subnav a { color:var(--paper); text-decoration:none; font-weight:600; font-size:13px; }
+.subnav a:hover { text-decoration:underline; }

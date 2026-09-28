@@ -54,11 +54,14 @@ def _same(a, b) -> bool:
 
 class TradeService:
     def __init__(self, cfg: TraderConfig, repo: Repository, broker: KiteTraderBroker, instruments: InstrumentService,
-                 quotes, clock, audit_log=None):
+                 quotes, clock, audit_log=None, extra_tick=None):
         self.cfg, self.repo, self.broker, self.instruments, self.quotes = cfg, repo, broker, instruments, quotes
         self.clock, self.audit_log = clock, audit_log
         self.lock = threading.RLock()
         self.placer = OrderPlacer(repo, broker, self.audit, cfg.order_lookup_grace_s, clock)
+        # Called at the end of every tick, under the same lock, after the per-trade engine has run - e.g.
+        # StrategyService.tick for multi-leg combined-P&L rules. Optional; never required by TradeService.
+        self.extra_tick = extra_tick
         self._resync = False
 
     # -- audit -------------------------------------------------------------------------------------
@@ -138,10 +141,16 @@ class TradeService:
                 pass                      # NRML trades are squared off too while TRADER_SQUARE_OFF_TIME is set
             partial_qty = req.partial_lots * inst.lot_size if req.partial_enabled and req.partial_lots else None
             auto_exit_at = datetime.combine(now.date(), req.auto_exit_time) if req.auto_exit_time else None
+            # order_type is a display/workflow label (MIS | CNC | BTST): CNC and BTST both place as product
+            # NRML (Zerodha has neither for F&O); BTST additionally skips the global square-off time below,
+            # so the position is meant to carry overnight and gets picked back up by this same engine on
+            # the next day's run - trades already resume across restarts regardless of which day they opened.
+            order_type = str(payload.get("order_type") or req.product).upper()
             tid = self.repo.insert_trade(dict(
                 mode=self.cfg.mode, trade_date=now.date().isoformat(), underlying=req.underlying,
                 exchange=inst.exchange, tradingsymbol=inst.tradingsymbol, expiry=inst.expiry.isoformat(),
                 strike=inst.strike, option_type=req.option_type, side=req.side, product=req.product,
+                order_type=order_type,
                 lot_size=inst.lot_size, tick_size=inst.tick_size, lots=req.lots, quantity=qty,
                 entry_price=req.entry_price, initial_sl=req.stop_loss, current_sl=req.stop_loss, target=req.target,
                 trail_enabled=int(req.trail_enabled), trail_type=req.trail_type if req.trail_enabled else None,
@@ -495,6 +504,11 @@ class TradeService:
             mismatches += int(bool(t2 and t2["mismatch_count"]))
         self._expire_unconfirmed(now)
         self._daily_limits(now)
+        if self.extra_tick is not None:
+            try:
+                self.extra_tick(now)
+            except Exception:
+                log.exception("extra_tick failed")
         self.repo.set_status_value("reconciliation", {"at": now.isoformat(timespec="seconds"),
                                                       "pending_mismatches": mismatches,
                                                       "needs_attention": len(self.repo.trades([L.ERROR, L.UNKNOWN]))})
@@ -959,6 +973,11 @@ class TradeService:
     def _time_exit_reason(self, t: dict, now: datetime) -> str | None:
         if t["auto_exit_at"] and now >= datetime.fromisoformat(t["auto_exit_at"]):
             return L.AUTO_EXIT
+        # BTST is an app-level "carry overnight" label (Zerodha has no BTST product for F&O): its trades
+        # skip the global intraday square-off and simply stay open, resumed by this engine on restart same
+        # as any other open trade, until their own auto-exit time, SL, target or a manual exit closes them.
+        if t.get("order_type") == "BTST":
+            return None
         if self.cfg.square_off_time and now.time() >= self.cfg.square_off_time:
             return L.SQUARE_OFF
         return None
