@@ -292,7 +292,9 @@ async function refresh() {
     const canExit = !["ERROR", "UNKNOWN_REQUIRES_RECONCILIATION"].includes(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
     const sl = t.current_sl !== t.initial_sl ? `${num(t.current_sl)} <small>(was ${num(t.initial_sl)})</small>` : num(t.current_sl);
     return `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td><td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td>
-      <td>${num(t.entry_avg_price ?? t.entry_price)}</td><td>${num(t.last_ltp)}</td><td>${sl}${t.sl_software_only ? " ⚠" : ""}</td>
+      <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
+      <td>${num(t.kite_ltp ?? t.last_ltp)}${t.kite_ltp != null ? ' <small title="from Zerodha positions()">K</small>' : ""}</td>
+      <td>${sl}${t.sl_software_only ? " ⚠" : ""}</td>
       <td>${num(t.target)}</td><td>${t.quantity}</td><td>${t.filled_qty}${t.open_qty !== t.filled_qty ? ` (open ${t.open_qty})` : ""}</td>
       <td class="${cls(t.pnl)}">${money(t.pnl)}</td><td class="${cls(t.pnl)}">${t.pnl_pct == null ? "–" : t.pnl_pct + "%"}</td>
       <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</span></td>
@@ -304,10 +306,12 @@ async function refresh() {
 
   $("#completed tbody").innerHTML = d.completed.map((t) => `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td>
     <td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td><td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-    <td>${num(t.exit_avg_price)}</td><td>${t.filled_qty}/${t.quantity}</td><td class="${cls(t.pnl)}">${money(t.pnl)}</td>
+    <td>${num(t.exit_avg_price)}</td>
+    <td>${num(t.kite_ltp ?? t.last_ltp)}${t.kite_ltp != null ? ' <small title="from Zerodha positions()">K</small>' : ""}</td>
+    <td>${t.filled_qty}/${t.quantity}</td><td class="${cls(t.pnl)}">${money(t.pnl)}</td>
     <td>${esc(t.exit_reason || t.error || "")}</td><td>${t.duration_s ? Math.round(t.duration_s / 60) + " min" : "–"}</td>
     <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}</span></td></tr>`).join("") ||
-    `<tr><td colspan="10">None yet</td></tr>`;
+    `<tr><td colspan="11">None yet</td></tr>`;
 
   const s = d.system, v = (k) => (s[k] || {}).value;
   const broker = v("broker") || {}, rec = v("reconciliation") || {}, proc = v("process") || {};

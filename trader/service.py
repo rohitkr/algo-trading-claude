@@ -620,6 +620,7 @@ class TradeService:
         inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
         ltp = self._ltp_safe(inst, max_age=self._price_age(t, now))
         self._mark(t, q, ltp, now)
+        self._mark_kite_ltp(t, snap)   # display only (Active-trades table); SL/target/trailing stay on Breeze
         if t["pending_exit_reason"]:
             self._continue_exit(t, q, ltp, now)
             return
@@ -938,6 +939,15 @@ class TradeService:
         self.repo.update_trade(t["id"], last_ltp=ltp, last_ltp_at=now.isoformat(timespec="seconds"),
                                unrealized_pnl=unreal)
         t.update(last_ltp=ltp, unrealized_pnl=unreal)
+
+    def _mark_kite_ltp(self, t: dict, snap: Snapshot) -> None:
+        """Kite's own last_price for this position (free, from positions()), display-only for the
+        Active-trades table. None in PAPER (PaperExchange carries no such field) and before an entry has
+        an actual Kite position - callers fall back to the Breeze `last_ltp` already shown."""
+        px = snap.kite_ltp(t["exchange"], t["tradingsymbol"], t["product"])
+        if px != t.get("kite_ltp"):
+            self.repo.update_trade(t["id"], kite_ltp=px)
+            t["kite_ltp"] = px
 
     def _price_age(self, t: dict, now: datetime) -> float:
         """How fresh the price must be for this trade. Fast only while a rule acts on it; a trade whose only

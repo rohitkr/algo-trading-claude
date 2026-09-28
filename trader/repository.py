@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS system_status (key TEXT PRIMARY KEY, value TEXT, upda
 """
 
 # Columns added after the first release: ALTERed into existing databases at start (additive only).
-ADDED_COLUMNS = {"trades": [("user_sl", "REAL"), ("group_id", "INTEGER"), ("leg_role", "TEXT")],
+ADDED_COLUMNS = {"trades": [("user_sl", "REAL"), ("group_id", "INTEGER"), ("leg_role", "TEXT"),
+                            ("kite_ltp", "REAL")],
                  "action_tokens": [("payload", "TEXT")]}
 
 TRADE_COLUMNS: set[str] = set()     # filled at first connect (PRAGMA table_info)

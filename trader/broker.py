@@ -106,6 +106,11 @@ class Snapshot:
     positions: dict[tuple[str, str, str], int]
     fetched_at: datetime
     by_id: dict[str, BrokerOrder] = field(default_factory=dict)
+    # Kite's own last_price per position, display-only (never used for SL/target/trailing/risk, which stay
+    # on Breeze). Free on Kite's Personal plan - positions() carries it regardless of quote-API access.
+    # PaperExchange.positions() has no such field, so this is always empty in PAPER: callers fall back to
+    # Breeze automatically by treating a missing key as "no Kite price".
+    last_price: dict[tuple[str, str, str], float] = field(default_factory=dict)
 
     def __post_init__(self):
         self.by_id = {o.order_id: o for o in self.orders}
@@ -118,6 +123,9 @@ class Snapshot:
 
     def net_any_product(self, exchange: str, tradingsymbol: str) -> int:
         return sum(q for (e, s, _), q in self.positions.items() if e == exchange and s == tradingsymbol)
+
+    def kite_ltp(self, exchange: str, tradingsymbol: str, product: str) -> float | None:
+        return self.last_price.get((exchange, tradingsymbol, product))
 
 
 class KiteTraderBroker:
@@ -142,10 +150,14 @@ class KiteTraderBroker:
     def snapshot(self, now: datetime) -> Snapshot:
         orders = [BrokerOrder.from_kite(o) for o in (self.kite.orders() or [])]
         pos: dict[tuple, int] = {}
+        last_price: dict[tuple, float] = {}
         for p in (self.kite.positions() or {}).get("net", []):
             k = (p.get("exchange", ""), p.get("tradingsymbol", ""), p.get("product", ""))
             pos[k] = pos.get(k, 0) + int(p.get("quantity") or 0)
-        return Snapshot(orders, pos, now)
+            lp = p.get("last_price")           # absent on PaperExchange; present (free) on real Kite
+            if lp not in (None, "", 0):
+                last_price[k] = float(lp)
+        return Snapshot(orders, pos, now, last_price=last_price)
 
     def ping(self) -> str:
         prof = self.kite.profile() or {}
