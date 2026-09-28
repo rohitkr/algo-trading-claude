@@ -1091,6 +1091,18 @@ class TradeService:
                     out[u] = {"exchange": exchange_for(u), "error": str(exc)}
             return {"underlyings": out, "mode": self.cfg.mode, "default_product": self.cfg.product}
 
+    def spot(self, underlying: str, with_ltp: bool = False) -> dict:
+        """The underlying index's own LTP (display only, e.g. the "NIFTY 22810" banner) - a Breeze call only
+        when asked, same as contract()'s "Get LTP". Never used for any trading decision."""
+        with self.lock:
+            px = None
+            if with_ltp and hasattr(self.quotes, "spot"):
+                try:
+                    px = self.quotes.spot(underlying, max_age=self.cfg.quote_ttl_s)
+                except Exception as exc:
+                    self.repo.set_status_value("last_error", f"spot {underlying}: {exc}")
+            return {"underlying": underlying, "spot": px}
+
     def contract(self, underlying: str, expiry: str, strike: float, option_type: str, with_ltp: bool = False) -> dict:
         """Contract details; the Breeze price only when asked (the form's "Get LTP" button), not on every change."""
         with self.lock:

@@ -27,6 +27,7 @@ class QuoteSource(Protocol):
     name: str
 
     def ltp(self, inst: Instrument, max_age: float | None = None) -> float | None: ...
+    def spot(self, underlying: str, max_age: float | None = None) -> float | None: ...
     def status(self) -> dict: ...
 
 
@@ -43,6 +44,9 @@ class ManualQuotes:
 
     def ltp(self, inst: Instrument, max_age: float | None = None) -> float | None:
         return self.prices.get(inst.tradingsymbol)
+
+    def spot(self, underlying: str, max_age: float | None = None) -> float | None:
+        return self.prices.get(f"SPOT:{underlying.upper()}")
 
     def price_for(self, exchange: str, tradingsymbol: str) -> float | None:
         return self.prices.get(tradingsymbol)
@@ -101,10 +105,23 @@ class BreezeQuotes:
         return HistoricalRequest(prof.stock_code, prof.exchange, prof.product_type, expiry=inst.expiry,
                                  right=inst.right.lower(), strike=inst.strike)
 
+    def _spot_request(self, underlying: str):
+        from trading_data.breeze.client import HistoricalRequest
+        inst = self.settings.instrument(underlying)         # the index's own stock code, e.g. NIFTY / CNXBAN
+        return HistoricalRequest(inst.stock_code, inst.exchange, inst.product_type)
+
     def ltp(self, inst: Instrument, max_age: float | None = None) -> float | None:
         """Cached price if younger than max(max_age or ttl_s, pacing interval); else one Breeze call.
         max_age=0 forces a call when budget allows (previews, exits)."""
-        key = inst.tradingsymbol
+        return self._quote(inst.tradingsymbol, lambda: self._request(inst), max_age)
+
+    def spot(self, underlying: str, max_age: float | None = None) -> float | None:
+        """The underlying index's own LTP (NIFTY, BANKNIFTY, ...), for display only - never used for any
+        trading decision. Same cache/budget/pacing as an option's ltp(), keyed separately so it doesn't
+        compete with option quotes for the pacing interval's per-symbol slot."""
+        return self._quote(f"SPOT:{underlying.upper()}", lambda: self._spot_request(underlying), max_age)
+
+    def _quote(self, key: str, build_request, max_age: float | None) -> float | None:
         with self._lock:
             now_m = self.monotonic()
             self._watched[key] = now_m
@@ -117,7 +134,7 @@ class BreezeQuotes:
             if pace == float("inf") and hit:
                 return hit[0]
             try:
-                req = self._request(inst)
+                req = build_request()
                 self.calls += 1
                 q = self.client().get_quote(req)
                 px = float(q["ltp"]) if q and q.get("ltp") not in (None, "") else None
@@ -126,7 +143,7 @@ class BreezeQuotes:
                     px = self._last_bar_close(req)
             except Exception as exc:
                 self.errors += 1
-                self.last_error = f"{inst.tradingsymbol}: {type(exc).__name__}: {exc}"
+                self.last_error = f"{key}: {type(exc).__name__}: {exc}"
                 log.warning("Breeze price error %s", self.last_error)
                 return hit[0] if hit else None     # the stale cached price, if any (caller sees last_ltp_at)
             if px and px > 0:

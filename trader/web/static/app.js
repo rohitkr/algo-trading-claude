@@ -6,7 +6,29 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<
 const money = (v) => (v == null ? "–" : "₹" + Number(v).toLocaleString("en-IN", {maximumFractionDigits: 2}));
 const num = (v) => (v == null || v === "" ? "–" : Number(v).toLocaleString("en-IN", {maximumFractionDigits: 2}));
 const tm = (s) => (s ? String(s).replace("T", " ").slice(5, 19) : "–");
-let META = null, MODE = "PAPER", LOT = null, SYMBOL = null;
+let META = null, MODE = "PAPER", LOT = null, SYMBOL = null, SPOT = null;
+
+// ---------------------------------------------------------------- persisted form (survives refresh)
+const STORE_KEY = "trader:form:v1";
+function loadStored() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || "null") || {}; } catch (e) { return {}; }
+}
+function saveStored() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(formData())); } catch (e) { /* private window etc: ignore */ }
+}
+const STORED = loadStored();
+function restoreRadio(name, fallback) {
+  const want = STORED[name] ?? fallback;
+  const el = form.querySelector(`input[name="${name}"][value="${want}"]`);
+  if (el) el.checked = true;
+}
+function restoreValue(name) {
+  if (STORED[name] == null || STORED[name] === "") return;
+  const el = form.elements[name];
+  if (!el) return;
+  if (el.type === "checkbox") el.checked = STORED[name] === true || STORED[name] === "true";
+  else el.value = STORED[name];
+}
 
 async function api(path, body) {
   const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json", "X-Trader": "1"}, body: JSON.stringify(body)};
@@ -29,24 +51,61 @@ async function loadMeta() {
   MODE = META.mode;
   const u = $("#underlying");
   u.innerHTML = Object.keys(META.underlyings).map((k) => `<option>${esc(k)}</option>`).join("");
-  $("#product").value = META.default_product;
+  if (STORED.underlying && Object.keys(META.underlyings).includes(STORED.underlying)) u.value = STORED.underlying;
+  restoreRadio("option_type", "CE"); restoreRadio("side", "BUY");
+  restoreRadio("product", "NRML");                    // NRML by default, not MIS
+  for (const f of ["lots", "entry_price", "stop_loss", "target", "trail_type", "trail_value", "trail_step",
+                    "partial_lots", "partial_price", "auto_exit_time"]) restoreValue(f);
+  restoreValue("trail_enabled"); restoreValue("partial_enabled");
   await onUnderlying();
 }
 
 async function onUnderlying() {
   const info = META.underlyings[$("#underlying").value] || {};
   $("#expiry").innerHTML = (info.expiries || []).map((e) => `<option>${esc(e)}</option>`).join("");
+  if (STORED.expiry && (info.expiries || []).includes(STORED.expiry)) $("#expiry").value = STORED.expiry;
   if (info.error) $("#form-hint").textContent = info.error;
+  $("#price-symbol").textContent = $("#underlying").value;
+  $("#price-value").textContent = "–";
+  SPOT = null;
+  await refreshSpot();               // the strike list below is built from THIS spot, so wait for it first
   await onExpiry();
+}
+
+async function refreshSpot() {
+  try {
+    const s = await api(`/api/spot?ltp=1&underlying=${encodeURIComponent($("#underlying").value)}`);
+    SPOT = s.spot;
+    $("#price-value").textContent = s.spot == null ? "no price" : money(s.spot);
+  } catch (e) { SPOT = null; $("#price-value").textContent = "–"; }
+}
+
+async function refreshOptionLtp() {
+  const d = formData();
+  if (!d.expiry || !d.strike) return;
+  try {
+    const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
+    $("#opt-ltp").textContent = c.ltp == null ? "no price" : money(c.ltp);
+  } catch (e) { $("#opt-ltp").textContent = "–"; }
 }
 
 async function onExpiry() {
   const u = $("#underlying").value, e = $("#expiry").value;
   if (!e) { $("#strike").innerHTML = ""; return; }
   const r = await api(`/api/strikes?underlying=${encodeURIComponent(u)}&expiry=${encodeURIComponent(e)}`);
+  const all = r.strikes;                                // ascending, the exchange's own strike interval
+  // ATM = the actual tradable strike closest to the real spot (generated only once spot is known); falls
+  // back to the middle of the chain when no spot price is available yet.
+  const center = SPOT == null ? Math.floor(all.length / 2)
+    : all.reduce((best, k, i) => Math.abs(k - SPOT) < Math.abs(all[best] - SPOT) ? i : best, 0);
+  const lo = Math.max(0, center - 20), hi = Math.min(all.length, center + 21);
+  const strikes = all.slice(lo, hi);                    // an equal number of strikes above and below ATM
+  const atmIndex = center - lo;
   const s = $("#strike"), prev = s.value;
-  s.innerHTML = r.strikes.map((k) => `<option value="${k}">${k}</option>`).join("");
-  if (prev && r.strikes.includes(Number(prev))) s.value = prev; else s.selectedIndex = Math.floor(r.strikes.length / 2);
+  s.innerHTML = strikes.map((k) => `<option value="${k}">${k}</option>`).join("");
+  if (STORED.strike && strikes.includes(Number(STORED.strike))) s.value = STORED.strike;
+  else if (prev && strikes.includes(Number(prev))) s.value = prev;
+  else s.selectedIndex = Math.min(atmIndex, strikes.length - 1);   // default: the ATM strike itself
   await onContract();
 }
 
@@ -56,9 +115,10 @@ async function onContract() {
   try {
     const c = await api(`/api/contract?underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
     LOT = c.lot_size; SYMBOL = c.tradingsymbol;
-    $("#ltp").textContent = "–";
+    $("#opt-ltp").textContent = "–";
     $("#pp-symbol").value = c.tradingsymbol;
-  } catch (e) { LOT = null; $("#ltp").textContent = "–"; $("#form-hint").textContent = e.message; }
+    refreshOptionLtp();               // auto: this contract's own LTP, no click needed
+  } catch (e) { LOT = null; $("#opt-ltp").textContent = "–"; $("#form-hint").textContent = e.message; }
   check();
 }
 
@@ -80,18 +140,20 @@ function check() {
   $("#partial_opts").classList.toggle("off", !d.partial_enabled);
   $("#form-hint").textContent = errs.join(" · ");
   $("#preview-btn").disabled = errs.length > 0 || !LOT;
-  $("#preview-btn").textContent = `Review ${d.side} trade…`;
+  $("#preview-btn").textContent = `Review ${d.side} order`;
+
+  const qty = LOT && lots ? lots * LOT : null;
+  const loss = qty && entry != null && sl != null ? Math.abs(entry - sl) * qty : null;
+  const gain = qty && entry != null && tgt != null ? Math.abs(tgt - entry) * qty : null;
+  $("#pnl-preview").classList.toggle("hidden", loss == null && gain == null);
+  $("#pnl-loss").textContent = loss == null ? "–" : money(loss);
+  $("#pnl-gain").textContent = gain == null ? "–" : money(gain);
 }
 
-$("#get-ltp").onclick = async () => {        // Breeze costs API calls: only on request
-  const d = formData();
-  try {
-    const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
-    $("#ltp").textContent = c.ltp == null ? "no price" : c.ltp;
-  } catch (e) { $("#ltp").textContent = e.message; }
-};
+$("#get-ltp").onclick = () => { refreshSpot(); refreshOptionLtp(); };   // manual refresh (auto-fetch also runs on selection)
 
 form.addEventListener("input", (ev) => {
+  saveStored();
   if (ev.target.name === "underlying") onUnderlying();
   else if (ev.target.name === "expiry") onExpiry();
   else if (["strike", "option_type"].includes(ev.target.name)) onContract();

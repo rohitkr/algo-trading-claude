@@ -16,14 +16,30 @@ h2 { margin:0 0 10px; font-size:16px; } h3 { font-size:14px; }
 label { display:flex; flex-direction:column; gap:3px; color:var(--muted); font-size:12px; }
 input, select, output { font:inherit; padding:6px; border:1px solid var(--line); border-radius:5px; background:var(--card); color:var(--fg); }
 output { font-weight:700; }
-fieldset { border:1px solid var(--line); border-radius:6px; margin:0 0 10px; }
+fieldset { border:1px solid var(--line); border-radius:8px; margin:0 0 14px; padding:12px 14px 2px; }
+legend { padding:0 6px; }
 legend label { flex-direction:row; color:var(--fg); font-size:13px; }
+.section > legend { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
 .opt.off { opacity:.4; pointer-events:none; }
 .seg { display:flex; } .seg input { display:none; }
 .seg label { flex:1; text-align:center; padding:6px; border:1px solid var(--line); cursor:pointer; font-weight:700; color:var(--muted); }
 .seg input:checked + label.buy { background:var(--buy); color:#fff; } .seg input:checked + label.sell { background:var(--sell); color:#fff; }
+.seg input:checked + label.on { background:#1d2330; color:#fff; }
+.price-panel { display:flex; align-items:center; gap:14px; padding:12px 14px; margin-bottom:14px; border:1px solid var(--line); border-radius:8px; background:rgba(127,127,127,.06); }
+.price-symbol { font-weight:700; font-size:13px; letter-spacing:.03em; color:var(--muted); }
+.price-value { font-size:28px; font-weight:800; font-variant-numeric: tabular-nums; flex:1; }
+.pnl-preview { display:flex; gap:24px; margin:2px 0 12px; font-size:13px; color:var(--muted); }
+.pnl-preview b { font-size:16px; }
+.contract-grid { grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); }
+.seg-grid { grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); margin-bottom:2px; }
+.order-grid { grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); }
+.option-ltp-row { display:flex; align-items:center; gap:6px; margin:-4px 0 12px; padding:5px 10px; border-radius:6px;
+  background:rgba(127,127,127,.08); font-size:12px; color:var(--muted); width:fit-content; }
+.option-ltp-row output { font-weight:700; color:var(--fg); font-size:13px; }
 button { font:inherit; padding:7px 14px; border-radius:5px; border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; }
 button.danger, #preview-btn { background:#1d2330; color:#fff; } button:disabled { opacity:.5; }
+.submit-btn { display:block; width:100%; padding:13px 16px; margin-top:4px; font-size:15px; font-weight:700;
+  letter-spacing:.02em; white-space:normal; line-height:1.3; }
 .hint { color:var(--sell); min-height:1em; }
 table { width:100%; border-collapse:collapse; font-variant-numeric: tabular-nums; }
 th, td { padding:5px 7px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }

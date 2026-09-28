@@ -78,6 +78,8 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path == "/api/contract":
                     return self._json(200, svc.contract(q["underlying"], q["expiry"], float(q["strike"]), q["option_type"],
                                                            with_ltp=q.get("ltp") == "1"))
+                if u.path == "/api/spot":
+                    return self._json(200, svc.spot(q["underlying"], with_ltp=q.get("ltp") == "1"))
                 m = re.fullmatch(r"/api/trades/(\d+)", u.path)
                 if m:
                     tid = int(m.group(1))

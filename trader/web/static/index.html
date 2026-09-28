@@ -12,34 +12,63 @@
 <main>
   <section class="card" id="new-trade">
     <h2>New trade</h2>
+    <div id="price-panel" class="price-panel">
+      <div class="price-symbol" id="price-symbol">–</div>
+      <div class="price-value" id="price-value">–</div>
+      <button type="button" id="get-ltp" title="prices refresh automatically on selection; click to force now">Refresh price</button>
+    </div>
     <form id="form" autocomplete="off">
-      <div class="grid">
-        <label>Instrument <select name="underlying" id="underlying"></select></label>
-        <label>Expiry <select name="expiry" id="expiry"></select></label>
-        <label>Strike <select name="strike" id="strike"></select></label>
-        <label>Option <select name="option_type"><option>CE</option><option>PE</option></select></label>
-        <label>Side
-          <span class="seg"><input type="radio" name="side" value="BUY" id="sbuy" checked><label for="sbuy" class="buy">BUY</label>
-          <input type="radio" name="side" value="SELL" id="ssell"><label for="ssell" class="sell">SELL</label></span>
-        </label>
-        <label>Product <select name="product" id="product"><option>MIS</option><option>NRML</option></select></label>
-        <label>Lots <input name="lots" type="number" min="1" step="1" value="1" required></label>
-        <label>Quantity <output id="qty">–</output></label>
-        <label>Entry limit ₹ <input name="entry_price" type="number" step="0.05" min="0.05" required></label>
-        <label>Stop-loss ₹ <input name="stop_loss" type="number" step="0.05" min="0.05" required></label>
-        <label>Target ₹ <input name="target" type="number" step="0.05" min="0.05"></label>
-        <label>LTP (Breeze) <span><output id="ltp">–</output> <button type="button" id="get-ltp" title="one Breeze call">Get LTP</button></span></label>
-      </div>
-      <fieldset>
-        <legend><label><input type="checkbox" name="trail_enabled" id="trail_enabled"> Trailing stop-loss</label></legend>
+      <fieldset class="section">
+        <legend>Contract</legend>
+        <div class="grid contract-grid">
+          <label>Instrument <select name="underlying" id="underlying"></select></label>
+          <label>Expiry <select name="expiry" id="expiry"></select></label>
+          <label>Strike <select name="strike" id="strike"></select></label>
+        </div>
+        <div class="grid seg-grid">
+          <label>Option
+            <span class="seg"><input type="radio" name="option_type" value="CE" id="oce" checked><label for="oce" class="on">CE</label>
+            <input type="radio" name="option_type" value="PE" id="ope"><label for="ope" class="on">PE</label></span>
+          </label>
+          <label>Side
+            <span class="seg"><input type="radio" name="side" value="BUY" id="sbuy" checked><label for="sbuy" class="buy">BUY</label>
+            <input type="radio" name="side" value="SELL" id="ssell"><label for="ssell" class="sell">SELL</label></span>
+          </label>
+          <label>Product
+            <span class="seg"><input type="radio" name="product" value="MIS" id="pmis"><label for="pmis" class="on">MIS</label>
+            <input type="radio" name="product" value="NRML" id="pnrml" checked><label for="pnrml" class="on">NRML</label></span>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset class="section">
+        <legend>Order</legend>
+        <div class="grid order-grid">
+          <label>Lots <input name="lots" type="number" min="1" step="1" value="1" required></label>
+          <label>Quantity <output id="qty">–</output></label>
+          <label>Entry limit ₹ <input name="entry_price" type="number" step="0.05" min="0.05" required></label>
+        </div>
+        <div class="option-ltp-row">Option LTP <output id="opt-ltp">–</output></div>
+        <div class="grid order-grid">
+          <label>Stop-loss ₹ <input name="stop_loss" type="number" step="0.05" min="0.05" required></label>
+          <label>Target ₹ <input name="target" type="number" step="0.05" min="0.05"></label>
+        </div>
+        <div id="pnl-preview" class="pnl-preview hidden">
+          <span>Max loss at SL <b id="pnl-loss" class="neg"></b></span>
+          <span>Gain at target <b id="pnl-gain" class="pos"></b></span>
+        </div>
+      </fieldset>
+
+      <fieldset class="section">
+        <legend><label class="check"><input type="checkbox" name="trail_enabled" id="trail_enabled"> Trailing stop-loss</label></legend>
         <div class="grid opt" id="trail_opts">
           <label>Type <select name="trail_type"><option value="POINTS">Points</option><option value="PERCENT">Percent</option></select></label>
           <label>Trail by <input name="trail_value" type="number" step="0.05" min="0"></label>
           <label>Min step (₹) <input name="trail_step" type="number" step="0.05" min="0" placeholder="1 tick"></label>
         </div>
       </fieldset>
-      <fieldset>
-        <legend><label><input type="checkbox" name="partial_enabled" id="partial_enabled"> Partial booking</label></legend>
+      <fieldset class="section">
+        <legend><label class="check"><input type="checkbox" name="partial_enabled" id="partial_enabled"> Partial booking</label></legend>
         <div class="grid opt" id="partial_opts">
           <label>Lots to book <input name="partial_lots" type="number" min="1" step="1"></label>
           <label>At price ₹ <input name="partial_price" type="number" step="0.05" min="0.05"></label>
@@ -49,7 +78,7 @@
         <label>Auto-exit time (optional) <input name="auto_exit_time" type="time"></label>
       </div>
       <p id="form-hint" class="hint"></p>
-      <button type="submit" id="preview-btn">Review trade…</button>
+      <button type="submit" id="preview-btn" class="submit-btn">Review trade</button>
     </form>
     <div id="paper-price" class="hidden">
       <h3>Paper price (manual quotes)</h3>
