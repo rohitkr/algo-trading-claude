@@ -1,0 +1,98 @@
+"""Wiring: config -> repository, instruments, prices, broker (paper or Kite), service."""
+from __future__ import annotations
+
+import fcntl
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+
+from trading_data.breeze.session_store import now_ist
+
+from .broker import build_broker
+from .config import TraderConfig
+from .instruments import InstrumentService, kite_loader
+from .market import BreezeQuotes, ManualQuotes
+from .paper import PaperExchange
+from .repository import Repository
+from .service import TradeService
+
+log = logging.getLogger("trader")
+
+
+class AlreadyRunning(RuntimeError):
+    pass
+
+
+@dataclass
+class App:
+    cfg: TraderConfig
+    service: TradeService
+    repo: Repository
+    paper: PaperExchange | None
+    quotes: object
+    lock_fh: object
+
+
+def single_instance_lock(db_path: Path):
+    """Two trader processes on one database would both manage the same trades: refuse the second."""
+    p = Path(db_path).with_suffix(".lock")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(p, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise AlreadyRunning(f"another trader process holds {p}") from None
+    fh.write("locked\n")
+    fh.flush()
+    return fh
+
+
+def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist) -> App:
+    lock = single_instance_lock(cfg.db_path)
+    repo = Repository(cfg.db_path, clock)
+    from zerodha.config import ZerodhaConfig
+    zcfg = ZerodhaConfig.from_env()
+
+    live_kite = None
+    if cfg.mode == "LIVE":
+        broker =build_broker(cfg, cli_live=cli_live, zcfg=zcfg)       # refuses unless every switch is on
+        live_kite = broker.kite
+
+    def kite_for_instruments():
+        if live_kite is not None:
+            return live_kite
+        from zerodha.auth import new_kite
+        return new_kite(zcfg) if zcfg.api_key else _PublicInstruments()
+
+    instruments = InstrumentService(kite_loader(kite_for_instruments), cfg.underlyings, clock)
+
+    if cfg.mode == "PAPER" and cfg.paper_quotes == "manual":
+        quotes = ManualQuotes()
+    else:
+        from trading_data.config import load_settings
+        quotes = BreezeQuotes(load_settings(), repo, cfg.breeze_daily_budget, cfg.quote_ttl_s, clock=clock,
+                              reserve=cfg.breeze_reserve)
+
+    paper = None
+    if cfg.mode == "PAPER":
+        def price(exchange: str, symbol: str):
+            # paper fills of working orders: priced at the slow rate (entries just rest until touched)
+            return quotes.ltp(instruments.by_symbol(exchange, symbol), max_age=cfg.quote_slow_s)
+        paper = PaperExchange(price, cfg.paper_state, clock=clock, slippage=cfg.paper_slippage)
+        broker = build_broker(cfg, cli_live=cli_live, paper_kite=paper)
+
+    from live.audit import AuditLog
+    audit = AuditLog(cfg.audit_dir, cfg.mode, clock=clock, instance="trader")
+    svc = TradeService(cfg, repo, broker, instruments, quotes, clock, audit_log=audit)
+    return App(cfg, svc, repo, paper, quotes, lock)
+
+
+class _PublicInstruments:
+    """Kite's instrument dump is a public CSV; used in PAPER when no KITE_API_KEY is configured."""
+
+    def instruments(self, exchange: str):
+        import csv
+        import io
+        import urllib.request
+        with urllib.request.urlopen(f"https://api.kite.trade/instruments/{exchange}", timeout=30) as r:
+            return list(csv.DictReader(io.StringIO(r.read().decode())))

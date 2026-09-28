@@ -72,6 +72,9 @@ class InstrumentBook:
     def expiries(self, underlying: str) -> list[date]:
         return sorted({k[1] for k in self._by_key if k[0] == underlying})
 
+    def strikes(self, underlying: str, expiry: date) -> list[float]:
+        return sorted({k[2] for k in self._by_key if k[0] == underlying and k[1] == expiry})
+
     # -- loading ----------------------------------------------------------------------
     @classmethod
     def from_csv(cls, path: str | Path) -> "InstrumentBook":

@@ -341,6 +341,17 @@ Architecture, configuration, Breeze/Zerodha requirements, PAPER/LIVE setup, risk
 monitoring, reconciliation, emergency square-off and the pre-LIVE checklist are in
 [`live/README.md`](live/README.md).
 
+## 8. Manual option trader (`trader/`)
+
+A local web UI (http://127.0.0.1:8765) to place and manage manual option trades on Zerodha:
+entry limit, SL (a real SL order at Zerodha), target, trailing SL, partial booking and auto-exit.
+Trades, orders and audit events are persisted in SQLite, and the app is restart-safe, with
+idempotent orders and manual-exit detection. PAPER is the default. See [`trader/README.md`](trader/README.md).
+
+```bash
+python3 -m trader serve            # PAPER
+```
+
 ## DuckDB
 
 - **File:** `data/market_data.duckdb` (gitignored). Every script creates the file and schema automatically on first use; `python3 scripts/init_db.py` does only that and prints the table sizes. No database server is needed.
@@ -424,7 +435,7 @@ ce = store.get_option_candles("NIFTY", expiry="2025-08-07", strike=24000, right=
 
 ```bash
 source venv/bin/activate
-python3 -m pytest -q tests zerodha/tests live/tests               # unit tests, no network, no credentials
+python3 -m pytest -q tests zerodha/tests live/tests trader/tests               # unit tests, no network, no credentials
 BREEZE_LIVE=1 python3 -m pytest tests/test_live_breeze.py -v      # optional live API checks (needs today's session)
 ```
 
@@ -459,6 +470,7 @@ strategy_signals/       broker-agnostic OrderIntent / OptionLeg + ExecutionBroke
 zerodha/                Kite Connect adapter: auth, instruments, orders, margin, paper broker, executor,
                         ExecutionBroker adapter (+ its own tests)
 live/                   live trading engine: strategies, risk, engine, state, audit, replay (+ README, tests)
+trader/                 manual option trading web UI + execution service (SQLite, reconciliation; README, tests)
 scripts/                command-line entry points (python3 scripts/<name>.py):
                           get_session_token.py, download_market_data.py (backfill + catch-up),
                           verify_market_data.py, show_candles.py, download_options.py, data_report.py, init_db.py,

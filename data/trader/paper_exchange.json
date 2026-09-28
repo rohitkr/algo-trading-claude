@@ -1,0 +1,100 @@
+{
+ "orders": {
+  "PPR260928000001": {
+   "order_id": "PPR260928000001",
+   "exchange": "NFO",
+   "tradingsymbol": "NIFTY26O0622850PE",
+   "transaction_type": "BUY",
+   "quantity": 195,
+   "product": "NRML",
+   "order_type": "LIMIT",
+   "price": 150.0,
+   "trigger_price": null,
+   "tag": "mtd4041E1",
+   "tags": [
+    "mtd4041E1"
+   ],
+   "status": "CANCELLED",
+   "filled_quantity": 0,
+   "average_price": 0.0,
+   "status_message": "",
+   "order_timestamp": "2026-09-28T12:43:34",
+   "order_date": "2026-09-28",
+   "hidden": 0
+  },
+  "PPR260928000002": {
+   "order_id": "PPR260928000002",
+   "exchange": "NFO",
+   "tradingsymbol": "NIFTY26O0622850PE",
+   "transaction_type": "BUY",
+   "quantity": 65,
+   "product": "NRML",
+   "order_type": "LIMIT",
+   "price": 160.0,
+   "trigger_price": null,
+   "tag": "mtd4044E1",
+   "tags": [
+    "mtd4044E1"
+   ],
+   "status": "COMPLETE",
+   "filled_quantity": 65,
+   "average_price": 155.45,
+   "status_message": "",
+   "order_timestamp": "2026-09-28T12:48:01",
+   "order_date": "2026-09-28",
+   "hidden": 0
+  },
+  "PPR260928000003": {
+   "order_id": "PPR260928000003",
+   "exchange": "NFO",
+   "tradingsymbol": "NIFTY26O0622850PE",
+   "transaction_type": "SELL",
+   "quantity": 65,
+   "product": "NRML",
+   "order_type": "SL",
+   "price": 142.5,
+   "trigger_price": 150.0,
+   "tag": "mtd4044S2",
+   "tags": [
+    "mtd4044S2"
+   ],
+   "status": "CANCELLED",
+   "filled_quantity": 0,
+   "average_price": 0.0,
+   "status_message": "",
+   "order_timestamp": "2026-09-28T13:26:24",
+   "order_date": "2026-09-28",
+   "hidden": 0
+  },
+  "PPR260928000004": {
+   "order_id": "PPR260928000004",
+   "exchange": "NFO",
+   "tradingsymbol": "NIFTY26O0622850PE",
+   "transaction_type": "SELL",
+   "quantity": 65,
+   "product": "NRML",
+   "order_type": "LIMIT",
+   "price": 153.7,
+   "trigger_price": null,
+   "tag": "mtd4044E3",
+   "tags": [
+    "mtd4044E3"
+   ],
+   "status": "COMPLETE",
+   "filled_quantity": 65,
+   "average_price": 156.85,
+   "status_message": "",
+   "order_timestamp": "2026-09-28T13:26:51",
+   "order_date": "2026-09-28",
+   "hidden": 0
+  }
+ },
+ "net": {
+  "NFO|NIFTY26O0622850PE|NRML": {
+   "qty": 0,
+   "buy_value": 10104.25,
+   "sell_value": 10195.25
+  }
+ },
+ "seq": 4
+}
