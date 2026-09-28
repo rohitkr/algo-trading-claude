@@ -201,5 +201,6 @@ class PaperBroker:
 
     def open_orders(self) -> list[dict]:
         return [{"order_id": oid, "tradingsymbol": o["req"].tradingsymbol, "status": o["status"],
+                 "tag": getattr(o["req"], "tag", ""),
                  "quantity": o["quantity"], "filled_quantity": o["filled"]}
                 for oid, o in self.orders.items() if o["status"] == "OPEN"]

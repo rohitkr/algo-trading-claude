@@ -29,7 +29,7 @@ from zerodha.margin import estimate_basket_margin
 
 from .audit import AuditLog
 from .config import EngineConfig
-from .engine import TradingEngine
+from .engine import Account, TradingEngine
 from .interfaces import MarketDataProvider
 from .risk import RiskManager
 from .selection import ContractSelector
@@ -54,11 +54,16 @@ class Clock:
 
 @dataclass
 class Built:
-    engine: TradingEngine
+    account: Account
+    instances: dict[str, TradingEngine]
     store: CandleStore
     feed: DataFeed
     clock: Clock
     paper: PaperBroker
+
+    @property
+    def engine(self) -> TradingEngine:            # the only / first instance
+        return next(iter(self.instances.values()))
 
 
 def setup_live_logging(settings: Settings, name: str) -> None:
@@ -70,35 +75,45 @@ def setup_live_logging(settings: Settings, name: str) -> None:
         logger.propagate = False
 
 
-def build(cfg: EngineConfig, *, clock: Clock | None = None, settings: Settings | None = None,
+def state_dir(cfg: EngineConfig) -> Path:
+    return cfg.state_dir / cfg.mode.lower()
+
+
+def build(cfgs: list[EngineConfig] | EngineConfig, *, clock: Clock | None = None, settings: Settings | None = None,
           store: CandleStore | None = None, client=None, market: MarketDataProvider | None = None,
-          state_path=None) -> Built:
-    if cfg.mode == "LIVE":
+          state_root: Path | None = None) -> Built:
+    """One Account with one TradingEngine per instance config (all sharing data feed and broker)."""
+    cfgs = [cfgs] if isinstance(cfgs, EngineConfig) else list(cfgs)
+    g = cfgs[0]                                     # account-wide settings are identical in every instance config
+    if g.mode == "LIVE":
         raise LiveModeNotWired("LIVE execution is not wired into the engine yet; run PAPER or BACKTEST. "
                                "See README 'LIVE mode setup' for what must be verified first.")
+    if len({c.underlying for c in cfgs}) > 1:
+        raise ValueError("all instances must trade the same UNDERLYING")
     settings = settings or load_settings()
     store = store or CandleStore(settings.paths.database)
     clock = clock or Clock()
+    root = Path(state_root) if state_root else state_dir(g)
 
-    if cfg.mode == "PAPER" and client is None and market is None:
+    if g.mode == "PAPER" and client is None and market is None:
         from trading_data.breeze.client import BreezeClient
         client = BreezeClient(settings, store).connect()
-    feed = DataFeed(settings, store, cfg.underlying, client if cfg.mode == "PAPER" else None)
-    selector = ContractSelector(feed, cfg.lot_size, cfg.strike_step)
+    feed = DataFeed(settings, store, g.underlying, client if g.mode == "PAPER" else None)
     if market is None:
-        if cfg.mode == "BACKTEST":
+        if g.mode == "BACKTEST":
             from .replay import ReplayMarketData
             market = ReplayMarketData(feed)
         else:
             from trading_data.breeze.live import BreezeMarketData
-            market = BreezeMarketData(client, settings, cfg.underlying,
-                                      min_refetch_s=cfg.bar_refetch_s, quote_ttl_s=cfg.quote_ttl_s)
+            market = BreezeMarketData(client, settings, g.underlying,
+                                      min_refetch_s=g.bar_refetch_s, quote_ttl_s=g.quote_ttl_s)
 
-    book = SyntheticInstrumentBook(selector.lot_size)
+    base_selector = ContractSelector(feed, g.lot_size, g.strike_step)
+    book = SyntheticInstrumentBook(base_selector.lot_size)
 
     def price(key: str) -> float:
         inst = book.by_symbol(key.split(":", 1)[1])
-        px = market.option_price(selector.contract(inst.expiry, inst.strike, inst.right), clock.now, fresh=True)
+        px = market.option_price(base_selector.contract(inst.expiry, inst.strike, inst.right), clock.now, fresh=True)
         if px is None:
             raise KeyError(f"no market price for {key}")
         return px
@@ -107,37 +122,39 @@ def build(cfg: EngineConfig, *, clock: Clock | None = None, settings: Settings |
         bars = market.spot_bars(clock.now.date(), clock.now)
         return float(bars["close"].iloc[-1]) if len(bars) else 0.0
 
-    paper = PaperBroker(funds=cfg.capital, price_fn=price,
-                        margin_fn=lambda reqs: estimate_basket_margin(reqs, book, spot_now(), cfg.paper_span_pct,
-                                                                      cfg.paper_exposure_pct),
-                        slippage=cfg.paper_slippage_points)
+    paper = PaperBroker(funds=sum(c.capital for c in cfgs), price_fn=price,
+                        margin_fn=lambda reqs: estimate_basket_margin(reqs, book, spot_now(), g.paper_span_pct,
+                                                                      g.paper_exposure_pct),
+                        slippage=g.paper_slippage_points)
     pcfg = replace(ZerodhaConfig.from_env(), dry_run=False, fill_timeout_s=0, poll_interval_s=0)
     broker = ZerodhaExecutionBroker(paper, book, pcfg, live=False,
-                                    name="paper (backtest replay)" if cfg.mode == "BACKTEST" else "paper")
+                                    name="paper (backtest replay)" if g.mode == "BACKTEST" else "paper")
 
-    pos_params, zd_params = params_from_config(cfg, selector.lot_size)
-    strategies = []
-    if "positional" in cfg.strategies:
-        strategies.append(PositionalBreakout(pos_params, cfg.positional_min_range_bars,
-                                             cfg.positional_new_signal_cancels_reentry,
-                                             intraday_exit=cfg.force_exit_time if cfg.intraday_only else None))
-    if "zerodte" in cfg.strategies:
-        seller = ZeroDteStraddleSeller(feed, zd_params)
-        strategies.append(ZeroDteStraddle(zd_params, walk_forward_chooser(seller, cfg.zerodte_entry_time),
-                                          quote_stops=cfg.zerodte_quote_stops,
-                                          max_entry_delay=timedelta(seconds=cfg.zerodte_max_entry_delay_s)))
+    account = Account(g, market, broker, [], EngineState.load(root / "_account.json"),
+                      AuditLog(g.audit_dir, g.mode, clock=now_ist, instance="account"))
+    instances: dict[str, TradingEngine] = {}
+    for cfg in cfgs:
+        selector = ContractSelector(feed, cfg.lot_size, cfg.strike_step)
+        pos_params, zd_params = params_from_config(cfg, selector.lot_size)
+        if cfg.strategy == "positional":
+            strat = PositionalBreakout(pos_params, cfg.positional_min_range_bars,
+                                       cfg.positional_new_signal_cancels_reentry,
+                                       intraday_exit=cfg.force_exit_time if cfg.intraday_only else None)
+        else:
+            seller = ZeroDteStraddleSeller(feed, zd_params)
+            strat = ZeroDteStraddle(zd_params, walk_forward_chooser(seller, cfg.zerodte_entry_time),
+                                    quote_stops=cfg.zerodte_quote_stops,
+                                    max_entry_delay=timedelta(seconds=cfg.zerodte_max_entry_delay_s))
+        instances[cfg.instance_id] = TradingEngine(
+            cfg, market, broker, selector, [strat], RiskManager(cfg), EngineState.load(root / f"{cfg.instance_id}.json"),
+            AuditLog(cfg.audit_dir, cfg.mode, clock=now_ist, instance=cfg.instance_id), account=account)
+    _persist_paper_exchange(account, paper, book, root / "_paper_exchange.json")
+    return Built(account, instances, store, feed, clock, paper)
 
-    state = EngineState.load(state_path or cfg.state_dir / f"state_{cfg.mode.lower()}.json")
-    audit = AuditLog(cfg.audit_dir, cfg.mode, clock=now_ist)
-    engine = TradingEngine(cfg, market, broker, selector, strategies, RiskManager(cfg), state, audit)
-    _persist_paper_exchange(engine, paper, book, state_path or cfg.state_dir / f"state_{cfg.mode.lower()}.json")
-    return Built(engine, store, feed, clock, paper)
 
-
-def _persist_paper_exchange(engine: TradingEngine, paper: PaperBroker, book, state_path) -> None:
+def _persist_paper_exchange(account: Account, paper: PaperBroker, book, path: Path) -> None:
     """The simulated exchange keeps its own positions file (like Zerodha keeps its own), so startup
     reconciliation in PAPER is a real cross-check. Edit it to rehearse a manual exit."""
-    path = Path(state_path).with_name(Path(state_path).stem + "_paper_exchange.json")
     if path.exists():
         for row in json.loads(path.read_text()):
             inst = book.option(row["underlying"], date.fromisoformat(row["expiry"]), row["strike"], row["right"])
@@ -152,4 +169,4 @@ def _persist_paper_exchange(engine: TradingEngine, paper: PaperBroker, book, sta
                              "right": i.right, "qty": q, "symbol": sym})
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(rows, indent=1))
-    engine.save_hooks.append(save)
+    account.save_hooks.append(save)

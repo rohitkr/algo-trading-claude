@@ -327,7 +327,9 @@ Personal plan has none) and Zerodha Kite for execution. The flow is
 Breeze → `MarketDataProvider` → `Strategy` → `RiskManager` → `ExecutionBroker` → Zerodha, and each
 part can be replaced on its own. The strategy rules are shared with the backtest
 (`backtest/rules.py`), both NAKED and HEDGED are selectable, and every risk limit comes from `.env`.
-Modes are BACKTEST (DuckDB replay), PAPER (default) and LIVE (**not wired yet**).
+Modes are BACKTEST (DuckDB replay), PAPER (default) and LIVE (**not wired yet**). Several independently
+configured algo instances (`INSTANCES=...`, e.g. a hedged positional and a 0DTE) run in one process,
+each with its own risk caps, state file, audit trail and Kite order tag.
 
 ```bash
 python3 -m live replay --start 2026-07-27 --end 2026-09-25 --parity   # live engine vs backtest on stored data

@@ -54,17 +54,18 @@ class ReplayMarketData:
 
 
 def backtest_trades(feed: DataFeed, cfg, start: date, end: date) -> list:
-    """The backtest's own trades for the same range and parameters (sold legs only)."""
+    """The backtest's own trades for one instance's strategy and parameters (hedged -> one record per spread)."""
+    from backtest.hedged import HedgedStrategy, HedgeParams, combine_positions
     from backtest.strategies import RangeBreakoutSeller, ZeroDteStraddleSeller
     from .strategies import params_from_config
 
     pos_p, zd_p = params_from_config(cfg, feed.profile.lot_size)
-    out = []
-    if "positional" in cfg.strategies:
-        out += [("positional", t) for t in RangeBreakoutSeller(feed, pos_p).run(start, end)]
-    if "zerodte" in cfg.strategies:
-        out += [("zerodte", t) for t in ZeroDteStraddleSeller(feed, zd_p).run(start, end)]
-    return out
+    strat = RangeBreakoutSeller(feed, pos_p) if cfg.strategy == "positional" else ZeroDteStraddleSeller(feed, zd_p)
+    if cfg.hedged:
+        trades = combine_positions(HedgedStrategy(strat, HedgeParams(cfg.hedge_width)).run(start, end))
+    else:
+        trades = strat.run(start, end)
+    return [(cfg.strategy, t) for t in trades]
 
 
 def compare(live: list[dict], bt: list) -> dict:

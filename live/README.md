@@ -42,6 +42,29 @@ Contents: [1 Architecture](#1-architecture) · [2 Environment](#2-environment-co
 - **Breeze access reuses `BreezeClient`**: the same session token file, persisted daily API budget,
   throttle, retries and candle validation as the downloaders. One addition is `get_quote`.
 
+### Several algo instances in one process
+
+```text
+Account (one process)  ── Breeze feed, broker, kill switches, reconciliation, _account.json
+  ├─ instance posH300  ── positional, HEDGED 300, holds to expiry;  own risk caps, state, audit, order tag
+  └─ instance zd1      ── 0DTE, NAKED, intraday;                    own risk caps, state, audit, order tag
+```
+
+One process runs every configured instance: `python3 -m live run`, or `--instance ID` for a subset.
+Reasons for one process rather than one per instance:
+- DuckDB allows one writer, and the Breeze API budget is counted there.
+- Zerodha reports net positions per contract for the whole account, so only a process that sees every
+  instance's book can tell whether the broker is right, which instance owns a difference, or whether
+  it's your manual trade.
+- One Breeze poll feeds every instance.
+
+Each instance is otherwise independent:
+- its own strategy, config, risk limits and daily caps
+- its own state file `data/live/<mode>/<ID>.json`
+- its own audit files `logs/live/audit_<mode>_<ID>_<date>.jsonl` and `trades_<mode>_<ID>.csv`
+- its own Kite order tag (the instance id)
+
+An exception in one instance is logged, and the others keep running.
 ```text
 live/
   interfaces.py   MarketDataProvider, Strategy, Signal, RiskCheck/RiskDecision (+ re-exports execution types)
@@ -49,12 +72,13 @@ live/
   selection.py    expiry / ATM / ITM / hedge-wing selection (backtest calendar + rules)
   strategies.py   PositionalBreakout, ZeroDteStraddle (minute state machines on backtest/rules.py)
   risk.py         pre-trade checks + sizing
-  engine.py       TradingEngine: poll loop, orders, exits/retries, MTM, data health, reconciliation, square-off
-  state.py        state_<mode>.json (atomic): open positions, strategy state, sent intents, daily counters
-  audit.py        audit_<mode>_<date>.jsonl + trades_<mode>.csv
+  engine.py       Account (loop, kill switches, reconciliation across instances, account caps, data health)
+                  + TradingEngine = one instance (orders, exits/retries, carry rules, MTM, its own caps)
+  state.py        <mode>/<ID>.json per instance + _account.json (atomic writes)
+  audit.py        audit_<mode>_<ID>_<date>.jsonl + trades_<mode>_<ID>.csv
   replay.py       BACKTEST: DuckDB replay provider + comparison with backtest/strategies.py
   app.py          wiring for BACKTEST / PAPER
-  __main__.py     CLI: run, replay, status, squareoff, resume
+  __main__.py     CLI: run, replay, status, squareoff, resume (all take --instance ID)
   tests/          offline tests (python3 -m pytest live/tests)
 backtest/rules.py                 shared rule functions
 strategy_signals/execution.py     ExecutionBroker protocol, ExecutionResult, LegFill
@@ -73,22 +97,31 @@ override it. The full table with defaults is at the top of [`live/config.py`](co
 (`KITE_*`, `zerodha/config.py`) and the expiry calendar and holidays (`config/settings.toml`,
 `config/holidays.toml`). Nothing in the code is a fixed trading value. The most important settings:
 
+**Instances.** `INSTANCES` lists them. `<ID>__KEY` sets any key for one instance. A key that isn't
+overridden falls back to the unprefixed `KEY`, and then to the default.
+- Ids are 1–12 letters or digits, because the id becomes the Kite order tag.
+- Account-wide keys can't be overridden per instance; a prefixed one is ignored with a warning. They
+  are `TRADING_MODE`, `ENABLE_LIVE_TRADING`, `UNDERLYING`, `SHARED_CONTRACTS`, `ACCOUNT_*`, `ENGINE_*`
+  and `PAPER_*`.
+- Without `INSTANCES`, there is one instance per strategy in `STRATEGIES`, named after the strategy.
+
 ```ini
 TRADING_MODE=PAPER            # BACKTEST | PAPER | LIVE   (default PAPER)
 ENABLE_LIVE_TRADING=false     # must be true for LIVE (and LIVE is not wired yet anyway)
-STRATEGIES=positional,zerodte
-POSITION_MODE=NAKED           # NAKED (as backtested) | HEDGED (buy a wing per short)
-HEDGE_WIDTH=200               # wing distance in points when HEDGED
-# LOT_SIZE=65                 # default: config/settings.toml [options.NIFTY]
-# STRIKE_STEP=50              # ATM = round(spot / STRIKE_STEP) x STRIKE_STEP
-INTRADAY_ONLY=true            # nothing survives FORCE_EXIT_TIME (see "Intraday only" below)
+INSTANCES=posH300,zd1
+posH300__STRATEGY=positional
+posH300__POSITION_MODE=HEDGED # NAKED | HEDGED (buy a wing per short)
+posH300__HEDGE_WIDTH=300      # wing distance in points
+posH300__INTRADAY_ONLY=false  # hold to expiry (positional default)
+posH300__EXPIRY_OFFSET=0      # 0 = nearest weekly expiry after the entry day, 1 = next week, ...
+posH300__RISK_MAX_DAILY_LOSS=40000
+zd1__STRATEGY=zerodte         # defaults: NAKED, intraday
+zd1__RISK_MAX_DAILY_LOSS=25000
+# shared defaults (any of these can be set per instance too)
 ENTRY_START_TIME=09:15        # no new entries before
 ENTRY_END_TIME=15:00          # no new entries after (signals after it are ignored, never opened)
-FORCE_EXIT_TIME=15:15         # everything still open is squared off
-POSITIONAL_LOTS=5
-ZERODTE_LOTS=5
-# ZERODTE_ENTRY_TIME=11:30    # only to override the walk-forward choice
-RISK_CAPITAL=1000000
+FORCE_EXIT_TIME=15:15         # intraday instances: everything still open is squared off
+RISK_CAPITAL=1000000          # per instance
 RISK_MAX_RISK_PER_TRADE=60000
 RISK_MAX_DAILY_LOSS_ENABLED=true
 RISK_MAX_DAILY_LOSS=50000
@@ -98,11 +131,36 @@ RISK_MAX_TRADES_PER_DAY=6
 RISK_MAX_OPEN_POSITIONS=3
 RISK_MAX_LOTS_PER_TRADE=5
 RISK_MAX_QTY_PER_TRADE=325
+# SHARED_CONTRACTS=false      # account-wide: may two instances hold the same contract?
 ```
 
-### Intraday only (default) and what it does to the positional strategy
+**Strategy defaults.**
+- Positional: `POSITION_MODE=HEDGED`, `HEDGE_WIDTH=300`, `INTRADAY_ONLY=false` (held to expiry, like the
+  backtest).
+- 0DTE: `POSITION_MODE=NAKED`, `INTRADAY_ONLY=true`.
 
-With `INTRADAY_ONLY=true`:
+Nothing is mandatory. Holding overnight NAKED, or holding overnight with `KITE_PRODUCT=MIS` (which
+Zerodha auto-closes around 15:20), only logs a WARNING at start.
+
+An unprefixed `POSITION_MODE=` or `HEDGE_WIDTH=` applies to **every** instance. Remove it if you want
+the per-strategy defaults.
+
+### Intraday only and what it does to the positional strategy
+
+Positional instances hold to expiry by default (`INTRADAY_ONLY=false`). Each position records:
+- `carry_allowed` and `hold_until` (the expiry-day exit)
+- `position_mode`, `entry_date`, both legs with entry and exit order ids, the stop, and the hedge
+  details
+
+That position is managed across days: the stop is checked each day, re-entry is allowed until 15:00 on
+expiry day, and it exits at 15:15 on expiry day. A safety exit fires only if it is somehow still open
+after that.
+
+Intraday instances (0DTE always, positional if you set `INTRADAY_ONLY=true`) are squared off at
+`FORCE_EXIT_TIME`, once that minute's bar has completed. A position of theirs found on a new day is an
+error, and it is exited at once.
+
+With `INTRADAY_ONLY=true` on a positional instance:
 
 - **Positional:** the position and its re-entry window end at `FORCE_EXIT_TIME` on the entry day.
   In the backtest it is held until the next weekly expiry.
@@ -206,9 +264,11 @@ Exits (stops, time exits, square-off) are never blocked.
 | Max quantity / lots | `RISK_MAX_QTY_PER_TRADE`, `RISK_MAX_LOTS_PER_TRADE`, `*_LOTS` | the smallest limit wins; the binding limit is logged |
 | Max trades per day | `RISK_MAX_TRADES_PER_DAY` | entries incl. re-entries |
 | Max open positions | `RISK_MAX_OPEN_POSITIONS` | positional + each 0DTE leg count separately |
-| Max daily loss | `RISK_MAX_DAILY_LOSS_ENABLED`, `RISK_MAX_DAILY_LOSS` | daily P&L (below) ≤ −limit: **halts new entries** until the next day (open positions keep their stops) |
-| Max daily profit | `RISK_MAX_DAILY_PROFIT_ENABLED`, `RISK_MAX_DAILY_PROFIT` | daily P&L ≥ cap: **squares off every strategy position**, session state `MAX_PROFIT_REACHED`, no more trades that day |
-| Daily P&L (both caps) | — | one function, `TradingEngine.daily_pnl()`: realised today + unrealised mark-to-market of every open strategy position vs today's reference price |
+| Max daily loss (per instance) | `RISK_MAX_DAILY_LOSS_ENABLED`, `RISK_MAX_DAILY_LOSS` | that instance's daily P&L ≤ −limit: **halts its new entries** until the next day (open positions keep their stops; nothing is force-closed) |
+| Max daily profit (per instance) | `RISK_MAX_DAILY_PROFIT_ENABLED`, `RISK_MAX_DAILY_PROFIT` | that instance's daily P&L ≥ cap: **squares off everything that instance holds, including overnight positions**; `MAX_PROFIT_REACHED`; no more trades for it that day. Other instances are unaffected |
+| Daily P&L (both caps) | — | `TradingEngine.daily_pnl()`: realised today + unrealised mark-to-market of the instance's open positions. A position held over several days is re-based to the previous day's last mark each morning, so each day counts only its own move (including an overnight gap), with no double counting |
+| Account caps (optional) | `ACCOUNT_MAX_DAILY_LOSS`, `ACCOUNT_MAX_DAILY_PROFIT` (0 = off) | sum over all instances: loss blocks every instance's entries; profit squares off everything |
+| One contract, one owner | `SHARED_CONTRACTS` (default false) | an instance may not open a contract another instance (or your manual position) holds, so every broker position has exactly one owner |
 | Re-entry limit | `RISK_MAX_REENTRIES`, `POSITIONAL_REENTRY`, `ZERODTE_REENTRY` | one re-entry per signal (per leg for 0DTE), at cost, same day (intraday), inside the entry window; never after a MANUAL_EXIT |
 | Stop-loss protection | strategy rules | every entry must carry a stop; stops are evaluated on every completed bar (0DTE also on quotes) |
 | Duplicate orders | automatic | every intent id is saved before sending; the same id is never sent twice (survives restarts); the same contract can't be opened twice |
@@ -227,22 +287,23 @@ Exits (stops, time exits, square-off) are never blocked.
 ## 8. Starting the engine
 
 ```bash
-python3 -m live run          # PAPER; idles until 09:16, stops at 15:35 (exits at once on a holiday).
-                             # Ctrl-C stops WITHOUT closing positions
-python3 -m live status       # state: open positions, halt reason, today's trades and realised P&L
-python3 -m live resume       # clear a halt after you have checked the cause
+python3 -m live run                      # PAPER, every instance; idles until 09:16, stops at 15:35
+                                         # (exits at once on a holiday). Ctrl-C stops WITHOUT closing positions
+python3 -m live run --instance posH300   # only some instances
+python3 -m live status [--instance ID]   # per instance: positions, halt, caps status, blocked signals
+python3 -m live resume [--instance ID]   # clear an instance's halt (without --instance: also the account's)
 ```
 
-At start the engine reconciles its saved state (`data/live/state_paper.json`) with the broker before
-trading (§9). In PAPER the simulated exchange keeps its own positions in
-`data/live/state_paper_paper_exchange.json`, so this check is real. Edit that file to rehearse a
-manual exit. With `INTRADAY_ONLY=false`, a positional trade is carried overnight and managed again the
-next morning.
+At start the engine reconciles every instance's saved state (`data/live/paper/<ID>.json`) with the
+broker before trading (§9). A carried positional spread is checked leg by leg against Zerodha, then
+managed as normal. In PAPER the simulated exchange keeps its own positions in
+`data/live/paper/_paper_exchange.json`, so this check is real. Edit that file to rehearse a manual
+exit.
 
 ## 9. Monitoring and reconciliation
 
 - **Console / `logs/live_paper.log`**: one line per decision. WARNING and above need attention.
-- **Audit trail `logs/live/audit_paper_<date>.jsonl`**: one JSON object per event.
+- **Audit trail `logs/live/audit_paper_<ID>_<date>.jsonl`** (per instance, plus `audit_paper_account_<date>.jsonl` for reconciliation, kill switches and account caps): one JSON object per event, each with its `instance`.
 
   | Event | What it records |
   |---|---|
@@ -252,7 +313,7 @@ next morning.
   | `position_opened` / `position_closed` | entry/exit prices, stop, hedge (strike, prices, net credit, max loss), quantity, exit reason, P&L |
   | Operational | `decision` (range, skipped signals, chosen 0DTE entry time), `reconcile`, `halt_new_entries`, `exit_failed`, `data_outage`, `square_off` |
 
-- **`logs/live/trades_paper.csv`**: one row per closed position.
+- **`logs/live/trades_paper_<ID>.csv`**: one row per closed position (instance, status incl. MANUAL_EXIT, P&L total and today, estimated flag, days held, entry and exit order ids).
 - **Reconciliation: the broker's positions are the truth.** It runs at startup, after every order
   and every `ENGINE_RECONCILE_SECONDS`, comparing each engine position (all its legs) with Zerodha's
   net positions. Broker position reports can lag a fill, so a mismatch must repeat on
@@ -268,7 +329,15 @@ next morning.
   | an option of the underlying the engine never opened | read-only `UNMANAGED`, CRITICAL alert, halt (`ENGINE_HALT_ON_UNKNOWN_POSITIONS`). Never touched. |
   | open orders at startup | halt: the engine cannot know what they belong to |
 
-  After a halt, check the positions in Kite and run `python3 -m live resume`. Positions that stay
+  **Several instances.**
+  - Every order carries its instance id as the Kite tag. Open orders at startup that carry an
+    instance's tag halt that instance; untagged ones are treated as yours and ignored.
+  - With `SHARED_CONTRACTS=false` (default), every contract has one owner, so the rules above apply to
+    that instance.
+  - With `true`, a contract held by several instances is checked as a sum. If it doesn't match, the
+    difference can't be attributed, so every instance holding it halts and nothing is changed.
+
+  After a halt, check the positions in Kite and run `python3 -m live resume [--instance ID]`. Positions that stay
   `UNMANAGED` are yours to manage by hand. They drop out of the state once the broker no longer
   holds them.
 
@@ -279,10 +348,19 @@ python3 -m live squareoff          # writes the kill file; the running engine cl
 python3 -m live squareoff --now    # engine not running: closes the saved positions directly
 ```
 
-A running engine checks for `ENGINE_KILL_FILE` (default `data/live/KILL`) at every poll. When it
-exists, the engine sends exit orders for every position it holds (main legs first, wings last),
-retries failures, reconciles, halts, and stops. It refuses to start while the file exists, so
-**delete the kill file only after checking positions in Kite**. Ctrl-C only stops the loop; it does
+```bash
+python3 -m live squareoff --instance posH300   # only that instance (KILL_posH300); the others keep running
+```
+
+A running engine checks the kill files at every poll.
+- **`ENGINE_KILL_FILE`** (default `data/live/KILL`) closes every position of every instance,
+  including overnight spreads, then stops the process.
+  - Exit orders go main legs first, wings last, and failures are retried.
+  - The engine refuses to start while the file exists.
+- **`KILL_<ID>`** closes that instance's positions and skips the instance while the file exists.
+  After deleting the file, run `python3 -m live resume --instance ID`.
+- **Delete kill files only after checking positions in Kite.**
+- Your manual positions are never touched. Ctrl-C only stops the loop; it does
 not close positions. As a last resort, square off in the Kite app: the next reconciliation will
 report the difference and halt.
 

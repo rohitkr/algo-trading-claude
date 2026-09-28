@@ -33,9 +33,12 @@ class ContractSelector:
         return d in self.feed.expiries(d, d)
 
     # positional: next weekly expiry strictly after the entry day, ITM by itm_points
-    def positional(self, spot: float, direction: str, day: date, itm_points: int) -> OptionContract:
+    def positional(self, spot: float, direction: str, day: date, itm_points: int,
+                   expiry_offset: int = 0) -> OptionContract:
         right = rules.breakout_right(direction)
         expiry = self.feed.next_expiry(day, strictly_after=True)
+        for _ in range(expiry_offset):              # same rule as backtest RangeBreakoutParams.expiry_offset
+            expiry = self.feed.next_expiry(expiry, strictly_after=True)
         return self.contract(expiry, rules.itm_strike(spot, right, itm_points, self.strike_step), right)
 
     # 0DTE: today's expiry, CALL at ATM - itm, PUT at ATM + itm

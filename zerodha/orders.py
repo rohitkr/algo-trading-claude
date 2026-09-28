@@ -62,19 +62,19 @@ class OrderManager:
         k = 1 + self.cfg.limit_buffer_pct / 100 if side == "BUY" else 1 - self.cfg.limit_buffer_pct / 100
         return round_to_tick(ltp * k, inst.tick_size, side)
 
-    def execute(self, inst: Instrument, side: str, quantity: int) -> list[Fill]:
+    def execute(self, inst: Instrument, side: str, quantity: int, tag: str | None = None) -> list[Fill]:
         """Buy/sell `quantity` units, sliced at the freeze limit; every slice must fill completely."""
         fills: list[Fill] = []
         for q in slice_quantity(quantity, inst.lot_size, self.cfg.freeze_qty):
             try:
-                fills.append(self._one(inst, side, q))
+                fills.append(self._one(inst, side, q, tag))
             except OrderFailed as exc:
                 raise OrderFailed(str(exc), fills + exc.fills) from None
         return fills
 
-    def _one(self, inst: Instrument, side: str, qty: int) -> Fill:
+    def _one(self, inst: Instrument, side: str, qty: int, tag: str | None = None) -> Fill:
         req = OrderRequest(inst.tradingsymbol, side, qty, inst.exchange, self.cfg.product, self.cfg.order_type,
-                           self.limit_price(inst, side), self.cfg.tag)
+                           self.limit_price(inst, side), tag or self.cfg.tag)
         oid = self.broker.place_order(req)
         log.info("placed %s %s x%d @ %s -> %s", side, inst.tradingsymbol, qty, req.price or "MKT", oid)
         for attempt in range(self.cfg.max_reprices + 1):

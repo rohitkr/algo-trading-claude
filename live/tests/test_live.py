@@ -232,9 +232,17 @@ def test_risk_reentry_limit_and_stale_signal():
 
 
 # -- engine (paper execution through the real Zerodha order path) ------------------------------
+def pcfg(**kw):
+    """PAPER config for the single-instance tests: intraday + naked (explicit, since positional now
+    defaults to HEDGED and holding to expiry)."""
+    base = dict(mode="PAPER", intraday_only=True, position_mode="NAKED")
+    base.update(kw)
+    return EngineConfig(**base)
+
+
 class Harness:
     def __init__(self, tmp_path, selector, market, cfg=None, strategies=None):
-        self.cfg = cfg or EngineConfig(mode="PAPER", kill_file=tmp_path / "KILL", state_dir=tmp_path,
+        self.cfg = cfg or pcfg(kill_file=tmp_path / "KILL", state_dir=tmp_path,
                                        audit_dir=tmp_path / "audit", capital=10_000_000, paper_slippage_points=0)
         self.now = datetime.combine(MON, time(9, 0))
         self.book = SyntheticInstrumentBook(65)
@@ -286,7 +294,7 @@ def test_engine_paper_round_trip_with_audit(tmp_path, selector):
 
 
 def test_engine_hedged_buys_wing_first_and_reports_max_loss(tmp_path, selector):
-    cfg = EngineConfig(mode="PAPER", position_mode="HEDGED", hedge_width=200, kill_file=tmp_path / "KILL",
+    cfg = pcfg(position_mode="HEDGED", hedge_width=200, kill_file=tmp_path / "KILL",
                        state_dir=tmp_path, audit_dir=tmp_path / "audit", capital=10_000_000, paper_slippage_points=0)
     h = Harness(tmp_path, selector, positional_market(), cfg)
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 32)))
@@ -330,7 +338,7 @@ def test_engine_position_changed_outside_is_unmanaged_and_halts(tmp_path, select
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 35)))
     h.paper.net["NIFTY260929P25200"] = -650          # someone doubled the position in Kite
     res = h.engine.reconcile(datetime.combine(MON, time(11, 36)))
-    assert res["pending_confirmation"] == ["PB-20260928"] and h.state.halted is None   # 1st sighting: wait
+    assert res["pending_confirmation"] == ["default:PB-20260928"] and h.state.halted is None   # 1st sighting: wait
     orders = len(h.paper.log)
     h.run(datetime.combine(MON, time(11, 37)), datetime.combine(MON, time(15, 20)))
     assert h.state.halted.startswith("reconciliation: PB-20260928")
@@ -341,7 +349,7 @@ def test_engine_position_changed_outside_is_unmanaged_and_halts(tmp_path, select
 
 
 def test_engine_daily_loss_halts_new_entries(tmp_path, selector):
-    cfg = EngineConfig(mode="PAPER", kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
+    cfg = pcfg(kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
                        capital=10_000_000, paper_slippage_points=0, max_daily_loss=10_000)
     h = Harness(tmp_path, selector, positional_market(), cfg)
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(15, 0)))
@@ -367,7 +375,10 @@ def test_engine_state_restart_keeps_overnight_position_and_duplicate_guard(tmp_p
 def test_defaults_are_paper_and_unarmed(tmp_path):
     cfg = EngineConfig.from_env(env_file=None, environ={})
     assert cfg.mode == "PAPER" and not cfg.enable_live_trading and not cfg.live_armed
-    assert cfg.position_mode == "NAKED"
+    assert cfg.strategy == "positional" and cfg.position_mode == "HEDGED" and cfg.hedge_width == 300
+    assert cfg.carry_allowed                                             # positional holds to expiry by default
+    z = EngineConfig.from_env(env_file=None, environ={"STRATEGY": "zerodte"})
+    assert z.position_mode == "NAKED" and z.intraday_only
     with pytest.raises(ValueError):
         EngineConfig(mode="REAL")
     c = EngineConfig.from_env(env_file=None, environ={"POSITION_MODE": "hedged", "HEDGE_WIDTH": "300",
@@ -454,7 +465,8 @@ def test_replay_matches_backtest_on_stored_data(tmp_path):
     out = subprocess.run([sys.executable, "-m", "live", "replay", "--start", "2026-08-24", "--end", "2026-09-10",
                           "--parity"], cwd=ROOT, capture_output=True, text=True, timeout=600)
     assert out.returncode == 0, out.stderr[-2000:]
-    summary = json.loads(out.stdout[out.stdout.index("{"):out.stdout.index("}") + 1])
+    start = out.stdout.index('{\n  "live_positions"')
+    summary = json.loads(out.stdout[start:out.stdout.index("}", start) + 1])
     assert summary["matched"] >= summary["backtest_trades"] - 1
     assert summary["same_exit_minute"] == summary["matched"] == summary["same_exit_reason"]
 
@@ -470,14 +482,14 @@ def test_intraday_force_exit_and_no_reentry_after(tmp_path, selector):
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(TUE, time(15, 20)))
     closed = h.audit("position_closed")
     assert [(c["position_id"], c["exit_reason"]) for c in closed] == [
-        ("PB-20260928", "stop: NIFTY 0.5% against"), ("PB-20260928R", "intraday force exit 15:15")]
+        ("PB-20260928", "stop: NIFTY 0.5% against"), ("PB-20260928R", "intraday exit")]
     assert closed[1]["exit_ts"].startswith("2026-09-28T15:15")      # same day, not the Tuesday expiry
     assert not h.state.positions and h.paper.positions() == {}
 
 
 def test_signal_after_entry_end_is_ignored_not_opened(tmp_path, selector):
     mon = day_bars(MON, {time(9, 15): 25000, time(9, 30): 25100, time(9, 45): 25050, time(14, 50): 25120}, 25050)
-    cfg = EngineConfig(mode="PAPER", kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
+    cfg = pcfg(kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
                        capital=10_000_000, paper_slippage_points=0, entry_end_time=time(14, 45))
     h = Harness(tmp_path, selector, FakeMarket({MON: mon}), cfg)
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(15, 20)))
@@ -509,7 +521,7 @@ def test_manual_exit_needs_two_consecutive_sightings(tmp_path, selector):
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(12, 0)))
     sym = h.book.option("NIFTY", TUE, 25200, "PUT").tradingsymbol
     h.paper.net[sym] = 0                                                # broker report lags a moment
-    assert h.engine.reconcile(datetime.combine(MON, time(12, 0, 30)))["pending_confirmation"] == ["PB-20260928"]
+    assert h.engine.reconcile(datetime.combine(MON, time(12, 0, 30)))["pending_confirmation"] == ["default:PB-20260928"]
     h.paper.net[sym] = -325                                             # ... and is back
     assert h.engine.reconcile(datetime.combine(MON, time(12, 0, 40)))["ok"]
     assert "PB-20260928" in h.state.positions
@@ -531,8 +543,9 @@ def test_unknown_broker_position_is_read_only_and_halts(tmp_path, selector):
     h.book.option("NIFTY", TUE, 24000, "CALL")
     h.paper.net["NIFTY260929C24000"] = 65                              # something the engine never opened
     res = h.engine.startup(datetime.combine(MON, time(9, 10)))
-    assert not res["ok"] and "BROKER NIFTY 2026-09-29 24000 CALL" in h.state.unmanaged
-    assert h.state.halted.startswith("reconciliation: unknown broker position")
+    acct = h.engine.account.state
+    assert not res["ok"] and "BROKER NIFTY 2026-09-29 24000 CALL" in acct.unmanaged
+    assert acct.halted.startswith("reconciliation: unknown broker position") and h.state.halted is None
     h.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(15, 20)))
     assert h.paper.net["NIFTY260929C24000"] == 65 and h.audit("position_opened") == []   # untouched, no trades
 
@@ -543,7 +556,7 @@ def test_startup_state_open_but_broker_flat_is_manual_exit(tmp_path, selector):
     h2 = Harness(tmp_path, selector, positional_market())               # restart; broker (fresh paper) is flat
     h2.engine.strategies[0].set_state(h.state.strategies["positional"])
     res = h2.engine.startup(datetime.combine(MON, time(11, 41)))
-    assert res["events"] == [{"event": "MANUAL_EXIT", "position_id": "PB-20260928"}]
+    assert res["events"] == [{"event": "MANUAL_EXIT", "instance": "default", "position_id": "PB-20260928"}]
     assert not h2.state.positions and h2.state.blocked["PB-20260928"] == "MANUAL_EXIT"
     assert h2.engine.strategies[0].get_state()["pos"] is None
     h2.run(datetime.combine(MON, time(11, 41)), datetime.combine(MON, time(15, 20)))
@@ -566,7 +579,7 @@ def test_startup_adopts_pending_entry_found_at_broker(tmp_path, selector):
     h2.paper.net["NIFTY260929P25200"] = -325
     h2.engine.strategies[0].set_state(h.state.strategies["positional"])
     res = h2.engine.startup(datetime.combine(MON, time(11, 41)))
-    assert res["events"] == [{"event": "adopted_pending_entry", "position_id": "PB-20260928"}]
+    assert res["events"] == [{"event": "adopted_pending_entry", "instance": "default", "position_id": "PB-20260928"}]
     p = h2.state.positions["PB-20260928"]
     assert p["entry_price_estimated"] and p["legs"][0]["qty"] == 325 and not h2.state.pending_entries
     h2.run(datetime.combine(MON, time(11, 42)), datetime.combine(MON, time(13, 5)))
@@ -584,16 +597,19 @@ def test_startup_drops_pending_entry_when_broker_flat(tmp_path, selector):
                                                               "expiry": "2026-09-29", "strike": 25200.0,
                                                               "right": "PUT"}}]}
     res = h.engine.startup(datetime.combine(MON, time(9, 10)))
-    assert res["events"] == [{"event": "pending_entry_dropped", "position_id": "PB-X"}]
+    assert res["events"] == [{"event": "pending_entry_dropped", "instance": "default", "position_id": "PB-X"}]
     assert not h.state.pending_entries and not h.state.positions and h.state.halted is None
 
 
 def test_open_orders_at_startup_halt(tmp_path, selector):
     h = Harness(tmp_path, selector, positional_market())
-    h.paper.orders["P99"] = {"req": type("R", (), {"tradingsymbol": "X"})(), "status": "OPEN", "quantity": 65,
-                             "filled": 0, "price": 1, "avg": 0, "msg": ""}
-    assert not h.engine.startup(datetime.combine(MON, time(9, 10)))["ok"]
-    assert "open order" in h.state.halted
+    manual = {"req": type("R", (), {"tradingsymbol": "X", "tag": ""})(), "status": "OPEN", "quantity": 65,
+              "filled": 0, "price": 1, "avg": 0, "msg": ""}
+    h.paper.orders["P98"] = manual                                      # yours (no instance tag): ignored
+    assert h.engine.startup(datetime.combine(MON, time(9, 10)))["ok"] and h.state.halted is None
+    h.paper.orders["P99"] = dict(manual, req=type("R", (), {"tradingsymbol": "X", "tag": "default"})())
+    assert not h.engine.startup(datetime.combine(MON, time(9, 11)))["ok"]
+    assert "open order P99" in h.state.halted
 
 
 def profit_market():
@@ -602,7 +618,7 @@ def profit_market():
 
 
 def test_max_daily_profit_squares_off_and_ends_day(tmp_path, selector):
-    cfg = EngineConfig(mode="PAPER", kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
+    cfg = pcfg(kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
                        capital=10_000_000, paper_slippage_points=0, max_daily_profit_enabled=True,
                        max_daily_profit=20_000)
     h = Harness(tmp_path, selector, profit_market(), cfg)
@@ -619,7 +635,7 @@ def test_max_daily_profit_squares_off_and_ends_day(tmp_path, selector):
 
 
 def test_daily_caps_share_one_pnl_and_can_be_disabled(tmp_path, selector):
-    cfg = EngineConfig(mode="PAPER", kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
+    cfg = pcfg(kill_file=tmp_path / "KILL", state_dir=tmp_path, audit_dir=tmp_path / "audit",
                        capital=10_000_000, paper_slippage_points=0, max_daily_loss_enabled=False,
                        max_daily_loss=1000)
     h = Harness(tmp_path, selector, positional_market(), cfg)
@@ -646,3 +662,194 @@ def test_new_config_keys_and_validation():
         EngineConfig(entry_end_time=time(15, 20), force_exit_time=time(15, 15))
     with pytest.raises(ValueError):
         EngineConfig(max_daily_profit_enabled=True, max_daily_profit=0)
+
+
+# -- round 3: several instances in one account ------------------------------------------------------
+from live.engine import Account  # noqa: E402
+
+
+class Multi:
+    """One Account + one PaperBroker shared by several instances (like live/app.build)."""
+
+    def __init__(self, tmp_path, selector, market, cfgs, net=None):
+        self.now = datetime.combine(MON, time(9, 0))
+        self.book = SyntheticInstrumentBook(65)
+        self.market, self.selector, self.tmp = market, selector, tmp_path
+        self.paper = PaperBroker(funds=1e9, price_fn=self._price, margin_fn=lambda reqs: 150_000.0)
+        zc = ZerodhaConfig(dry_run=False, fill_timeout_s=0, poll_interval_s=0, max_reprices=1)
+        self.broker = ZerodhaExecutionBroker(self.paper, self.book, zc, live=False)
+        g = cfgs[0]
+        self.account = Account(g, market, self.broker, [], EngineState.load(tmp_path / "_account.json"),
+                               AuditLog(g.audit_dir, "PAPER", instance="account"))
+        self.inst = {}
+        for c in cfgs:
+            strat = PositionalBreakout(replace(RangeBreakoutParams(), expiry_offset=c.expiry_offset),
+                                       intraday_exit=c.force_exit_time if c.intraday_only else None)
+            self.inst[c.instance_id] = TradingEngine(
+                c, market, self.broker, selector, [strat], RiskManager(c),
+                EngineState.load(tmp_path / f"{c.instance_id}.json"),
+                AuditLog(c.audit_dir, "PAPER", instance=c.instance_id), account=self.account)
+        for sym_key, q in (net or {}).items():
+            self.paper.net[self.book.option(*sym_key).tradingsymbol] = q
+
+    def _price(self, key):
+        i = self.book.by_symbol(key.split(":")[1])
+        return self.market.option_price(self.selector.contract(i.expiry, i.strike, i.right), self.now)
+
+    def run(self, start, end):
+        self.now = start
+        while self.now <= end:
+            self.account.step(self.now)
+            self.now += M
+
+    def audit(self, iid, event=None):
+        recs = [json.loads(l) for p in sorted((self.tmp / "audit").glob(f"audit_paper_{iid}_*.jsonl"))
+                for l in p.read_text().splitlines()]
+        return [r for r in recs if event is None or r["event"] == event]
+
+
+def icfg(tmp_path, iid, **kw):
+    base = dict(mode="PAPER", instance_id=iid, kill_file=tmp_path / "KILL", state_dir=tmp_path,
+                audit_dir=tmp_path / "audit", capital=10_000_000, paper_slippage_points=0,
+                intraday_only=True, position_mode="NAKED")
+    base.update(kw)
+    return EngineConfig(**base)
+
+
+NEXT_TUE = date(2026, 10, 6)
+
+
+def test_two_instances_have_independent_profit_caps(tmp_path, selector):
+    a = icfg(tmp_path, "A", max_daily_profit_enabled=True, max_daily_profit=20_000)
+    b = icfg(tmp_path, "B", expiry_offset=1)                          # next week's contract: no clash with A
+    m = Multi(tmp_path, selector, profit_market(), [a, b])
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(12, 5)))
+    A, B = m.inst["A"], m.inst["B"]
+    assert A.state.session_status == "MAX_PROFIT_REACHED" and A.state.halted == "MAX_PROFIT_REACHED"
+    assert not A.state.positions and "MAX_PROFIT_REACHED" in A.closed[0]["exit_reason"]
+    assert B.state.session_status is None and B.state.halted is None and "PB-20260928" in B.state.positions
+    assert B.state.positions["PB-20260928"]["legs"][0]["contract"]["expiry"] == NEXT_TUE.isoformat()
+    assert m.paper.positions() == {m.book.option("NIFTY", NEXT_TUE, 25200, "PUT").tradingsymbol: -325}
+    assert (tmp_path / "A.json").exists() and (tmp_path / "B.json").exists()
+    sa, sb = json.loads((tmp_path / "A.json").read_text()), json.loads((tmp_path / "B.json").read_text())
+    assert sa["positions"] == {} and list(sb["positions"]) == ["PB-20260928"]    # state kept per instance
+
+
+def test_profit_cap_flattens_a_carried_hedged_spread(tmp_path, selector):
+    a = icfg(tmp_path, "A", intraday_only=False, position_mode="HEDGED", hedge_width=300,
+             max_daily_profit_enabled=True, max_daily_profit=15_000)
+    m = Multi(tmp_path, selector, profit_market(), [a])
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 32)))
+    pos = m.inst["A"].state.positions["PB-20260928"]
+    assert pos["carry_allowed"] and pos["position_mode"] == "HEDGED" and pos["hold_until"].startswith("2026-09-29T15:15")
+    m.run(datetime.combine(MON, time(11, 33)), datetime.combine(MON, time(12, 5)))
+    assert not m.inst["A"].state.positions and m.paper.positions() == {}           # both legs closed
+    closed = m.inst["A"].closed[0]
+    assert "MAX_PROFIT_REACHED" in closed["exit_reason"] and closed["position_mode"] == "HEDGED"
+    assert len(closed["exit_order_ids"]) == 2
+
+
+def test_per_instance_and_global_kill_switches(tmp_path, selector):
+    m = Multi(tmp_path, selector, positional_market(), [icfg(tmp_path, "A"), icfg(tmp_path, "B", expiry_offset=1)])
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 35)))
+    assert m.inst["A"].state.positions and m.inst["B"].state.positions
+    (tmp_path / "KILL_A").write_text("x")
+    m.run(datetime.combine(MON, time(11, 36)), datetime.combine(MON, time(11, 40)))
+    assert not m.inst["A"].state.positions and m.inst["A"].killed
+    assert m.inst["B"].state.positions and not m.account.stopped                 # B keeps running
+    (tmp_path / "KILL").write_text("x")
+    m.run(datetime.combine(MON, time(11, 41)), datetime.combine(MON, time(11, 42)))
+    assert m.account.stopped and not m.inst["B"].state.positions and m.paper.positions() == {}
+
+
+def test_orders_are_tagged_with_the_instance(tmp_path, selector):
+    m = Multi(tmp_path, selector, positional_market(), [icfg(tmp_path, "A"), icfg(tmp_path, "B", expiry_offset=1)])
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 35)))
+    tags = {o["req"].tradingsymbol: o["req"].tag for o in m.paper.orders.values()}
+    assert tags == {m.book.option("NIFTY", TUE, 25200, "PUT").tradingsymbol: "A",
+                    m.book.option("NIFTY", NEXT_TUE, 25200, "PUT").tradingsymbol: "B"}
+    assert m.audit("A", "order")[0]["tag"] == "A" and m.audit("B", "order")[0]["tag"] == "B"
+
+
+def test_shared_contract_blocked_by_default(tmp_path, selector):
+    m = Multi(tmp_path, selector, positional_market(), [icfg(tmp_path, "A"), icfg(tmp_path, "B")])
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 35)))
+    assert m.inst["A"].state.positions and not m.inst["B"].state.positions
+    rc_b = m.audit("B", "risk_check")[0]
+    assert not rc_b["ok"] and any(c["check"] == "contract_free" and "another instance" in c["detail"]
+                                  for c in rc_b["checks"])
+
+
+def test_shared_contract_mismatch_halts_every_claimant(tmp_path, selector):
+    cfgs = [icfg(tmp_path, "A", shared_contracts=True), icfg(tmp_path, "B", shared_contracts=True)]
+    m = Multi(tmp_path, selector, positional_market(), cfgs)
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(11, 35)))
+    sym = m.book.option("NIFTY", TUE, 25200, "PUT").tradingsymbol
+    assert m.paper.net[sym] == -650 and m.inst["A"].state.positions and m.inst["B"].state.positions
+    m.paper.net[sym] = -325                                              # someone closed half in Kite
+    m.run(datetime.combine(MON, time(11, 36)), datetime.combine(MON, time(11, 38)))
+    for iid in ("A", "B"):
+        assert m.inst[iid].state.halted.startswith("reconciliation: shared contract")
+        assert m.inst[iid].state.positions                               # nothing changed: cannot attribute
+
+
+def test_manual_position_untouched_and_blocks_all_instances(tmp_path, selector):
+    m = Multi(tmp_path, selector, positional_market(), [icfg(tmp_path, "A"), icfg(tmp_path, "B", expiry_offset=1)],
+              net={("NIFTY", TUE, 24000, "CALL"): 65})
+    m.account.startup(datetime.combine(MON, time(9, 10)))
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(15, 20)))
+    assert m.paper.net["NIFTY260929C24000"] == 65
+    assert not m.audit("A", "position_opened") and not m.audit("B", "position_opened")
+    assert m.account.state.halted.startswith("reconciliation: unknown broker position")
+
+
+def test_positional_carries_to_expiry_but_intraday_positions_never_do(tmp_path, selector):
+    carry = icfg(tmp_path, "P", intraday_only=False)
+    m = Multi(tmp_path, selector, positional_market(), [carry])
+    m.run(datetime.combine(MON, time(9, 16)), datetime.combine(MON, time(15, 30)))
+    P = m.inst["P"]
+    assert "PB-20260928R" in P.state.positions                            # re-entered at 14:00, held overnight
+    m2 = Multi(tmp_path, selector, positional_market(), [carry],          # restart next morning
+               net={("NIFTY", TUE, 25200, "PUT"): -325})
+    m2.inst["P"].strategies[0].set_state(P.state.strategies["positional"])
+    assert m2.account.startup(datetime.combine(TUE, time(9, 5)))["ok"]
+    m2.run(datetime.combine(TUE, time(9, 16)), datetime.combine(TUE, time(15, 20)))
+    day = [r for r in m2.audit("P", "day_start") if r["market_ts"].startswith("2026-09-29")][0]
+    assert day["carried_positions"] == ["PB-20260928R"] and day["stray_positions"] == []
+    closed = m2.inst["P"].closed[0]
+    assert closed["exit_reason"] == "expiry-day exit" and closed["exit_ts"].startswith("2026-09-29T15:15")
+    assert closed["days_held"] == 1
+    # an intraday instance that somehow still holds yesterday's position exits it at once
+    i = icfg(tmp_path / "i", "I")
+    (tmp_path / "i").mkdir()
+    m3 = Multi(tmp_path / "i", selector, positional_market(), [i], net={("NIFTY", TUE, 25200, "PUT"): -325})
+    I = m3.inst["I"]
+    I.state.positions["PB-OLD"] = I._position(
+        "PB-OLD", "positional", False, datetime.combine(MON, time(11, 30)), datetime.combine(MON, time(11, 31)),
+        25120.0, "t", {"basis": "spot", "level": 1}, [I._leg(("NIFTY", TUE, 25200.0, "PUT"), "SELL", "MAIN", 325,
+                                                          OptionContract("NIFTY", "NFO", TUE, 25200, "PUT"), 130.0)],
+        None, False, "2026-09-28T15:15:00")
+    m3.run(datetime.combine(TUE, time(9, 16)), datetime.combine(TUE, time(9, 17)))
+    assert I.closed[0]["exit_reason"].startswith("intraday: carried over from 2026-09-28")
+    assert [r for r in m3.audit("I", "day_start")][0]["stray_positions"] == ["PB-OLD"]
+
+
+def test_load_instances_prefixes_and_defaults():
+    from live.config import load_instances
+    cfgs, warns = load_instances(None, {"INSTANCES": "posH300,zd1", "posH300__STRATEGY": "positional",
+                                        "zd1__STRATEGY": "zerodte", "RISK_MAX_DAILY_LOSS": "30000",
+                                        "zd1__RISK_MAX_DAILY_LOSS": "10000", "posH300__ENGINE_POLL_SECONDS": "1"})
+    p, z = cfgs
+    assert (p.instance_id, p.position_mode, p.hedge_width, p.intraday_only, p.max_daily_loss) == \
+        ("posH300", "HEDGED", 300, False, 30000)
+    assert (z.instance_id, z.position_mode, z.intraday_only, z.max_daily_loss) == ("zd1", "NAKED", True, 10000)
+    assert any("ENGINE_POLL_SECONDS is account-wide" in w for w in warns)
+    naked, w2 = load_instances(None, {"INSTANCES": "p", "p__STRATEGY": "positional", "p__POSITION_MODE": "NAKED",
+                                      "KITE_PRODUCT": "MIS"})
+    assert len(w2) == 2 and naked[0].position_mode == "NAKED"              # warnings, never a refusal
+    legacy, _ = load_instances(None, {})
+    assert [c.instance_id for c in legacy] == ["positional", "zerodte"]
+    with pytest.raises(ValueError):
+        load_instances(None, {"INSTANCES": "bad_id", "bad_id__STRATEGY": "positional"})
+    with pytest.raises(ValueError):
+        load_instances(None, {"INSTANCES": "x"})                            # STRATEGY missing

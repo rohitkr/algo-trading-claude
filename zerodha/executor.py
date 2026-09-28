@@ -83,7 +83,7 @@ class Executor:
                 for i, (l, inst) in enumerate(legs)]
         rep = ExecutionReport(intent.intent_id, "ENTRY", True, self.cfg.dry_run, plan)
         reqs = [OrderRequest(inst.tradingsymbol, l.side.value, l.quantity, inst.exchange, self.cfg.product,
-                             self.cfg.order_type, self.orders.limit_price(inst, l.side.value), self.cfg.tag)
+                             self.cfg.order_type, self.orders.limit_price(inst, l.side.value), self._tag(intent))
                 for l, inst in legs]
         rep.margin = check_margin(self.broker, reqs, self.cfg.margin_buffer_pct)
         if not rep.margin.ok:
@@ -98,13 +98,13 @@ class Executor:
         opened: list[OpenLeg] = []
         for l, inst in legs:
             try:
-                fills = self.orders.execute(inst, l.side.value, l.quantity)
+                fills = self.orders.execute(inst, l.side.value, l.quantity, self._tag(intent))
             except OrderFailed as exc:
                 rep.fills += exc.fills
                 filled = sum(f.quantity for f in exc.fills)
                 if filled:
                     opened.append(OpenLeg(l, inst, filled))
-                rep.unwound = self._unwind(opened)
+                rep.unwound = self._unwind(opened, self._tag(intent))
                 rep.ok = False
                 rep.message = (f"{l.role.value} leg failed ({exc}); "
                                f"{'no short was sold' if l.role.value == 'HEDGE' else 'position unwound'}")
@@ -115,12 +115,12 @@ class Executor:
         rep.message = f"opened {len(opened)} legs"
         return rep
 
-    def _unwind(self, opened: list[OpenLeg]) -> list[Fill]:
+    def _unwind(self, opened: list[OpenLeg], tag: str | None = None) -> list[Fill]:
         """Reverse filled legs: mains first, hedges last."""
         out: list[Fill] = []
         for ol in sorted(opened, key=lambda o: o.leg.role.value == "HEDGE"):
             try:
-                out += self.orders.execute(ol.inst, ol.leg.side.opposite.value, ol.quantity)
+                out += self.orders.execute(ol.inst, ol.leg.side.opposite.value, ol.quantity, tag)
             except OrderFailed as exc:
                 out += exc.fills
                 log.critical("could not unwind %s x%d: %s - CHECK POSITIONS MANUALLY",
@@ -141,7 +141,7 @@ class Executor:
             return rep
         for i, o in enumerate(ordered):
             try:
-                rep.fills += self.orders.execute(o.inst, o.leg.side.opposite.value, o.quantity)
+                rep.fills += self.orders.execute(o.inst, o.leg.side.opposite.value, o.quantity, self._tag(intent))
             except OrderFailed as exc:
                 rep.fills += exc.fills
                 rep.ok = False
@@ -152,6 +152,10 @@ class Executor:
         self.positions.pop(intent.position_id, None)
         rep.message = f"closed {len(ordered)} legs"
         return rep
+
+    def _tag(self, intent: OrderIntent) -> str:
+        """Kite order tag: the intent's own (e.g. the live engine's instance id) or KITE_TAG."""
+        return str(intent.meta.get("tag") or self.cfg.tag)[:20]
 
     # -- helpers ------------------------------------------------------------------------
     def _instrument(self, leg: OptionLeg) -> Instrument:

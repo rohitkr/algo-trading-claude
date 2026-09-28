@@ -43,6 +43,11 @@ def main() -> int:
     log = get_logger("backtest")
     feed_probe = DataFeed(settings, store, args.underlying)
     last = store.market_coverage(feed_probe.instrument.name, feed_probe.instrument.exchange, "1minute")[1]
+    if last is None:
+        print(f"No {feed_probe.instrument.name} 1-minute data in DuckDB yet. Download it first, e.g.\n"
+              f"  python3 scripts/download_market_data.py --instruments {feed_probe.instrument.name} "
+              f"--start 2026-04-01 --end today", file=sys.stderr)
+        return 1
     end = args.end or last
     start = args.start or feed_probe.cal.next_trading_day(end - timedelta(days=61), include_self=True)
     client = None if args.offline else connect_client(settings, store)

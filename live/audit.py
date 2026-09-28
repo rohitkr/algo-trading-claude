@@ -16,10 +16,12 @@ from pathlib import Path
 
 log = logging.getLogger("live")
 
-TRADE_FIELDS = ["position_id", "strategy", "mode", "position_mode", "underlying", "expiry", "right", "strike",
+TRADE_FIELDS = ["instance", "position_id", "strategy", "status", "mode", "position_mode", "underlying", "expiry",
+                "right", "strike",
                 "side", "quantity", "entry_ts", "entry_spot", "entry_price", "stop", "hedge_strike",
                 "hedge_entry_price", "net_credit", "max_loss", "margin", "exit_ts", "exit_spot", "exit_price",
-                "hedge_exit_price", "exit_reason", "gross_pnl", "is_reentry", "order_ids"]
+                "hedge_exit_price", "exit_reason", "gross_pnl", "pnl_today", "pnl_estimated", "days_held",
+                "is_reentry", "order_ids", "exit_order_ids"]
 
 
 def _jsonable(v):
@@ -33,31 +35,32 @@ def _jsonable(v):
 
 
 class AuditLog:
-    def __init__(self, directory: Path, mode: str, clock=datetime.now):
+    def __init__(self, directory: Path, mode: str, clock=datetime.now, instance: str = ""):
         self.dir = Path(directory)
         self.mode = mode
+        self.instance = instance
         self.clock = clock
         self.dir.mkdir(parents=True, exist_ok=True)
         self.records = 0
 
     def path_for(self, d: date) -> Path:
-        return self.dir / f"audit_{self.mode.lower()}_{d:%Y-%m-%d}.jsonl"
+        return self.dir / f"audit_{self.mode.lower()}{'_' + self.instance if self.instance else ''}_{d:%Y-%m-%d}.jsonl"
 
     def write(self, event: str, market_ts: datetime | None = None, level: int = logging.INFO, **fields) -> dict:
         wall = self.clock()
         rec = {"wall_ts": wall.isoformat(timespec="seconds"), "market_ts": market_ts.isoformat() if market_ts else None,
-               "mode": self.mode, "event": event, **fields}
+               "mode": self.mode, "instance": self.instance or None, "event": event, **fields}
         day = market_ts.date() if market_ts else wall.date()
         with open(self.path_for(day), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, default=_jsonable) + "\n")
         self.records += 1
         summary = ", ".join(f"{k}={v}" for k, v in fields.items()
                             if k in ("position_id", "contract", "reason", "ok", "message", "lots", "pnl", "detail"))
-        log.log(level, "[%s] %s %s", self.mode, event, summary)
+        log.log(level, "[%s%s] %s %s", self.mode, f" {self.instance}" if self.instance else "", event, summary)
         return rec
 
     def trade(self, row: dict) -> None:
-        path = self.dir / f"trades_{self.mode.lower()}.csv"
+        path = self.dir / f"trades_{self.mode.lower()}{'_' + self.instance if self.instance else ''}.csv"
         new = not path.exists()
         with open(path, "a", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=TRADE_FIELDS, extrasaction="ignore")

@@ -81,11 +81,21 @@ zerodha/config.py; the expiry calendar and holidays are config/settings.toml + c
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
 
 MODES = ("BACKTEST", "PAPER", "LIVE")
+STRATEGY_DEFAULTS = {"positional": {"position_mode": "HEDGED", "intraday_only": False},
+                     "zerodte": {"position_mode": "NAKED", "intraday_only": True}}
+INSTANCE_ID = re.compile(r"[A-Za-z0-9]{1,12}")
+# Account-wide settings: only the unprefixed value counts (an <id>__ override is ignored with a warning).
+GLOBAL_KEYS = {"TRADING_MODE", "ENABLE_LIVE_TRADING", "UNDERLYING", "INSTANCES", "STRATEGIES", "SHARED_CONTRACTS",
+               "ACCOUNT_MAX_DAILY_LOSS", "ACCOUNT_MAX_DAILY_PROFIT", "ENGINE_POLL_SECONDS", "ENGINE_STOP_TIME",
+               "ENGINE_RECONCILE_SECONDS", "ENGINE_RECONCILE_CONFIRMATIONS", "ENGINE_HALT_ON_UNKNOWN_POSITIONS",
+               "ENGINE_EXIT_RETRY_LIMIT", "ENGINE_BAR_REFETCH_SECONDS", "ENGINE_QUOTE_TTL_SECONDS", "ENGINE_KILL_FILE",
+               "ENGINE_STATE_DIR", "ENGINE_AUDIT_DIR", "PAPER_SLIPPAGE_POINTS", "PAPER_SPAN_PCT", "PAPER_EXPOSURE_PCT"}
 
 
 def _bool(v: str) -> bool:
@@ -111,14 +121,16 @@ def load_env(env_file: str | Path | None = ".env", environ: dict | None = None) 
 class EngineConfig:
     mode: str = "PAPER"
     enable_live_trading: bool = False
-    strategies: tuple[str, ...] = ("positional", "zerodte")
-    position_mode: str = "NAKED"
-    hedge_width: int = 200
+    instance_id: str = "default"
+    strategy: str = "positional"         # positional | zerodte (one strategy per instance)
+    position_mode: str | None = None     # None = strategy default: positional HEDGED, zerodte NAKED
+    hedge_width: int = 300
+    expiry_offset: int = 0               # positional: 0 = nearest weekly expiry after the entry day, 1 = next, ...
     underlying: str = "NIFTY"
     lot_size: int | None = None          # None = settings.toml [options.<underlying>].lot_size
     strike_step: int | None = None
     # session
-    intraday_only: bool = True
+    intraday_only: bool | None = None    # None = strategy default: positional False (hold to expiry), zerodte True
     entry_start_time: time = time(9, 15)
     entry_end_time: time = time(15, 0)
     force_exit_time: time = time(15, 15)
@@ -171,6 +183,9 @@ class EngineConfig:
     reconcile_seconds: float = 60.0
     reconcile_confirmations: int = 2
     halt_on_unknown_positions: bool = True
+    shared_contracts: bool = False       # may two instances hold the same contract at once?
+    account_max_daily_loss: float = 0.0  # 0 = off; across all instances: blocks every instance's entries
+    account_max_daily_profit: float = 0.0  # 0 = off; across all instances: squares off everything
     exit_retry_limit: int = 5
     bar_refetch_s: float = 15.0
     quote_ttl_s: float = 20.0
@@ -183,15 +198,20 @@ class EngineConfig:
     paper_exposure_pct: float = 2.0
 
     def __post_init__(self):
+        if self.strategy not in STRATEGY_DEFAULTS:
+            raise ValueError(f"STRATEGY must be positional or zerodte, not {self.strategy!r}")
+        if self.position_mode is None:
+            object.__setattr__(self, "position_mode", STRATEGY_DEFAULTS[self.strategy]["position_mode"])
+        if self.intraday_only is None:
+            object.__setattr__(self, "intraday_only", STRATEGY_DEFAULTS[self.strategy]["intraday_only"])
+        if not INSTANCE_ID.fullmatch(self.instance_id):
+            raise ValueError(f"instance id {self.instance_id!r}: use 1-12 letters/digits (it becomes the Kite order tag)")
         if self.mode not in MODES:
             raise ValueError(f"TRADING_MODE must be one of {MODES}, not {self.mode!r}")
         if self.position_mode not in ("NAKED", "HEDGED"):
             raise ValueError(f"POSITION_MODE must be NAKED or HEDGED, not {self.position_mode!r}")
         if self.position_mode == "HEDGED" and self.hedge_width <= 0:
             raise ValueError("HEDGE_WIDTH must be positive in HEDGED mode")
-        unknown = set(self.strategies) - {"positional", "zerodte"}
-        if unknown:
-            raise ValueError(f"unknown STRATEGIES {sorted(unknown)}; use positional,zerodte")
         if not (self.entry_start_time <= self.entry_end_time <= self.force_exit_time):
             raise ValueError("need ENTRY_START_TIME <= ENTRY_END_TIME <= FORCE_EXIT_TIME")
         if self.max_daily_profit_enabled and self.max_daily_profit <= 0:
@@ -202,6 +222,24 @@ class EngineConfig:
     @property
     def hedged(self) -> bool:
         return self.position_mode == "HEDGED"
+
+    @property
+    def strategies(self) -> tuple[str, ...]:
+        return (self.strategy,)
+
+    @property
+    def carry_allowed(self) -> bool:
+        return not self.intraday_only
+
+    def warnings(self, kite_product: str = "NRML") -> list[str]:
+        """Risky but allowed combinations (logged at start, never refused)."""
+        out = []
+        if self.carry_allowed and not self.hedged:
+            out.append(f"{self.instance_id}: holds {self.strategy} positions overnight NAKED (gap risk is unbounded)")
+        if self.carry_allowed and kite_product.upper() == "MIS":
+            out.append(f"{self.instance_id}: holds overnight but KITE_PRODUCT=MIS; Zerodha auto-squares-off MIS "
+                       "around 15:20, use NRML")
+        return out
 
     @property
     def live_armed(self) -> bool:
@@ -229,14 +267,14 @@ class EngineConfig:
         kw = dict(
             mode=(g("TRADING_MODE", "") or "PAPER").upper(),
             enable_live_trading=flag("ENABLE_LIVE_TRADING", "enable_live_trading"),
-            strategies=tuple(s.strip().lower() for s in (g("STRATEGIES", "") or "positional,zerodte").split(",")
-                             if s.strip()),
-            position_mode=(g("POSITION_MODE", "") or "NAKED").upper(),
+            strategy=(g("STRATEGY", "") or "positional").lower(),
+            position_mode=(g("POSITION_MODE", "") or "").upper() or None,
             hedge_width=num("HEDGE_WIDTH", "hedge_width", int),
+            expiry_offset=num("EXPIRY_OFFSET", "expiry_offset", int),
             underlying=(g("UNDERLYING", "") or "NIFTY").upper(),
             lot_size=num("LOT_SIZE", "lot_size", int),
             strike_step=num("STRIKE_STEP", "strike_step", int),
-            intraday_only=flag("INTRADAY_ONLY", "intraday_only"),
+            intraday_only=_bool(g("INTRADAY_ONLY")) if g("INTRADAY_ONLY", "") != "" else None,
             entry_start_time=tm("ENTRY_START_TIME", "entry_start_time"),
             entry_end_time=tm("ENTRY_END_TIME", "entry_end_time", "RISK_NO_NEW_ENTRIES_AFTER"),
             force_exit_time=tm("FORCE_EXIT_TIME", "force_exit_time"),
@@ -286,6 +324,9 @@ class EngineConfig:
             reconcile_seconds=num("ENGINE_RECONCILE_SECONDS", "reconcile_seconds"),
             reconcile_confirmations=num("ENGINE_RECONCILE_CONFIRMATIONS", "reconcile_confirmations", int),
             halt_on_unknown_positions=flag("ENGINE_HALT_ON_UNKNOWN_POSITIONS", "halt_on_unknown_positions"),
+            shared_contracts=flag("SHARED_CONTRACTS", "shared_contracts"),
+            account_max_daily_loss=num("ACCOUNT_MAX_DAILY_LOSS", "account_max_daily_loss"),
+            account_max_daily_profit=num("ACCOUNT_MAX_DAILY_PROFIT", "account_max_daily_profit"),
             exit_retry_limit=num("ENGINE_EXIT_RETRY_LIMIT", "exit_retry_limit", int),
             bar_refetch_s=num("ENGINE_BAR_REFETCH_SECONDS", "bar_refetch_s"),
             quote_ttl_s=num("ENGINE_QUOTE_TTL_SECONDS", "quote_ttl_s"),
@@ -298,3 +339,44 @@ class EngineConfig:
         )
         kw.update(overrides)
         return cls(**kw)
+
+
+def load_instances(env_file: str | Path | None = ".env", environ: dict | None = None,
+                   only: list[str] | None = None) -> tuple[list[EngineConfig], list[str]]:
+    """One EngineConfig per instance, plus warnings.
+
+    INSTANCES=posA,zd1 names the instances; `<id>__KEY` overrides KEY for that instance, anything
+    not overridden falls back to the unprefixed KEY and then to the default. Without INSTANCES, one
+    instance per strategy in STRATEGIES (default positional,zerodte), named after the strategy.
+    """
+    e = load_env(env_file, environ)
+    ids = [x.strip() for x in e.get("INSTANCES", "").split(",") if x.strip()]
+    legacy = not ids
+    if legacy:
+        ids = [x.strip().lower() for x in (e.get("STRATEGIES", "") or "positional,zerodte").split(",") if x.strip()]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"duplicate instance ids in INSTANCES: {ids}")
+    base = {k: v for k, v in e.items() if "__" not in k}
+    out, warnings = [], []
+    for iid in ids:
+        env_i = dict(base)
+        for k, v in e.items():
+            if k.startswith(iid + "__"):
+                key = k[len(iid) + 2:]
+                if key in GLOBAL_KEYS:
+                    warnings.append(f"{k} ignored: {key} is account-wide, set it without a prefix")
+                else:
+                    env_i[key] = v
+        if legacy:
+            env_i["STRATEGY"] = iid
+        elif not env_i.get("STRATEGY"):
+            raise ValueError(f"set {iid}__STRATEGY=positional|zerodte")
+        cfg = EngineConfig.from_env(env_file=None, environ=env_i, instance_id=iid)
+        out.append(cfg)
+        warnings += cfg.warnings(env_i.get("KITE_PRODUCT", "NRML"))
+    if only:
+        missing = set(only) - {c.instance_id for c in out}
+        if missing:
+            raise ValueError(f"unknown instance(s) {sorted(missing)}; configured: {[c.instance_id for c in out]}")
+        out = [c for c in out if c.instance_id in only]
+    return out, warnings

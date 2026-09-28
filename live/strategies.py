@@ -161,7 +161,7 @@ class PositionalBreakout(_Base):
         if self.s["waiting"]:
             self.note(ts, "reentry_cancelled", position_id=self.s["waiting"]["pid"], reason="new breakout signal")
             self.s["waiting"] = None
-        contract = ctx.selector.positional(close, direction, d, p.itm_points)
+        contract = ctx.selector.positional(close, direction, d, p.itm_points, p.expiry_offset)
         out.append(self._enter(ctx, ts, close, contract, direction, f"PB-{d:%Y%m%d}", reentry=False))
         return out
 
@@ -354,7 +354,8 @@ def params_from_config(cfg, lot_size: int) -> tuple[RangeBreakoutParams, ZeroDte
     pos = replace(RangeBreakoutParams(), itm_points=cfg.positional_itm_points, sl_pct=cfg.positional_sl_pct,
                   reentry=cfg.positional_reentry, lots=cfg.positional_lots, range_start=cfg.positional_range_start,
                   range_end=cfg.positional_range_end, last_entry=cfg.positional_last_entry,
-                  exit_time=cfg.positional_exit_time, act_until=cfg.positional_act_until)
+                  exit_time=cfg.positional_exit_time, act_until=cfg.positional_act_until,
+                  expiry_offset=cfg.expiry_offset)
     zd = replace(ZeroDteParams(), itm_points=cfg.zerodte_itm_points, sl_pct=cfg.zerodte_sl_pct,
                  reentry=cfg.zerodte_reentry, lookback=cfg.zerodte_lookback, lots=cfg.zerodte_lots,
                  first_entry=cfg.zerodte_first_entry, last_entry=cfg.zerodte_last_entry,
