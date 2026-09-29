@@ -132,6 +132,9 @@ async function onBaseUnderlying() {
   $("#base-expiry").innerHTML = (info.expiries || []).map((e) => `<option>${esc(e)}</option>`).join("");
   if (RESTORING && STORED?.expiry && (info.expiries || []).includes(STORED.expiry)) $("#base-expiry").value = STORED.expiry;
   $("#base-spot-symbol").textContent = $("#base-underlying").value;
+  $("#base-spot").dataset.price = `SPOT:${$("#base-underlying").value}`;   // pushed by live.js
+  $("#base-spot").dataset.fmt = "money";
+  Live.watch([$("#base-spot").dataset.price]);
   if (!RESTORING) showLegsLoading();
   await refreshSpot();
   // Changing the instrument governs every leg row (their own expiry dropdown is built from THIS
@@ -149,6 +152,8 @@ async function refreshSpot(force, keepDisplay) {
   try {
     const s = await api(`/api/spot?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent($("#base-underlying").value)}`);
     SPOT = s.spot; $("#base-spot").textContent = s.spot == null ? "no price" : money(s.spot);
+    $("#base-spot").title = s.error || "";
+    if (s.error) $("#form-hint").textContent = s.error;
   } catch (e) { /* leave as no price */ }
 }
 function flash(el) { if (el) { el.classList.remove("value-flash"); void el.offsetWidth; el.classList.add("value-flash"); } }
@@ -229,7 +234,13 @@ async function fetchLegPrice(leg, force) {
   if (!leg.expiry || !leg.strike) return;
   try {
     const c = await api(`/api/contract?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent(leg.underlying)}&expiry=${leg.expiry}&strike=${leg.strike}&option_type=${leg.option_type}`);
-    if (c.ltp != null) leg.entry_price = c.ltp;
+    // A price belongs to one contract: when this contract has no price (e.g. none from the data source),
+    // never keep the previous contract's price (switching NIFTY -> GOLDM left FINNIFTY's prices in place).
+    // A price typed by hand for this same contract is kept.
+    const key = `${leg.underlying}|${leg.expiry}|${leg.strike}|${leg.option_type}`;
+    if (c.ltp != null) { leg.entry_price = c.ltp; leg.priced_for = key; }
+    else if (leg.priced_for !== key) { leg.entry_price = null; leg.priced_for = key; }
+    if (c.price_error) $("#form-hint").textContent = c.price_error;
     if (c.lot_size != null) leg.lot_size = c.lot_size;      // needed for the payoff chart's rupee scale
   } catch (e) { /* leave price editable, empty */ }
   renderLegs();
@@ -686,9 +697,9 @@ function strategyCard(s) {
     const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${qtyText}</td>
     <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-    <td data-ltp-cell="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
+    <td data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
     <td>${num(t.current_sl)}</td><td>${num(t.target)}</td>
-    <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}">${money(t.pnl)}</td>
+    <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
     <td>${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
@@ -700,7 +711,7 @@ function strategyCard(s) {
       <span class="name">#${s.id} ${esc(s.name)}</span>
       <span class="status-pill ${esc(s.status)}">${esc(s.status)}</span>
       <span>order type ${esc(cfg.order_type)}</span>
-      <span class="pnl ${cls}">${money(s.combined_pnl)}</span>
+      <span class="pnl ${cls}" data-strategy-pnl="${s.id}">${money(s.combined_pnl)}</span>
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
     <div class="leg-table-scroll">
@@ -813,7 +824,10 @@ async function refreshStrategies() {
   if (d.halted) h.textContent = `New trades blocked: ${d.halted}`;
   try {
     const sd = await api("/api/strategies");
-    $("#strategies-list").innerHTML = sd.strategies.map(strategyCard).join("") || `<p class="hint small">No strategies yet.</p>`;
+    const html = sd.strategies.map(strategyCard).join("") || `<p class="hint small">No strategies yet.</p>`;
+    const list = $("#strategies-list");
+    if (list._html !== html) { list.innerHTML = html; list._html = html; }   // unchanged state: leave the DOM alone
+    Live.reapply();
   } catch (e) { /* keep the last render */ }
 }
 // Manual LTP refresh: no click-count limit of our own (max_age=0 on every call) - Breeze's own daily
@@ -867,5 +881,10 @@ loadMeta().then(() => {
   RESTORING = false;
 }).catch((e) => { $("#form-hint").textContent = "Could not load instruments: " + e.message; RESTORING = false; })
   .finally(() => { $("#page-loading").classList.add("hidden"); });
+// No polling: the server pushes "dashboard" when any trade/order state changes; LTP / P&L cells are patched
+// in place by live.js on every tick. The slow refresh is only a safety net.
+Live.onPrice((k, px) => { if (k === $("#base-spot").dataset.price) SPOT = px; });
+Live.onDashboard(refreshStrategies);
+Live.start();
 refreshStrategies();
-setInterval(refreshStrategies, 2000);
+setInterval(refreshStrategies, 30000);

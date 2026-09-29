@@ -1,7 +1,9 @@
 """Wiring: builds the engine for BACKTEST and PAPER from the existing components.
 
     market data  BACKTEST: live.replay.ReplayMarketData (DuckDB)
-                 PAPER:    trading_data.breeze.live.BreezeMarketData (Breeze, existing session + budget)
+                 PAPER:    MARKET_DATA_PROVIDER=BREEZE (default): trading_data.breeze.live.BreezeMarketData
+                           MARKET_DATA_PROVIDER=KITE: marketdata.kite_provider.KiteMarketDataProvider
+                           (KiteTicker prices + Kite historical bars; see marketdata/config.py)
     execution    zerodha.execution.ZerodhaExecutionBroker over zerodha.PaperBroker (simulated exchange,
                  real Zerodha order path: margin check, leg ordering, slicing, re-pricing, unwinds)
     strategies   live.strategies over backtest/rules.py + backtest parameter classes
@@ -81,7 +83,7 @@ def state_dir(cfg: EngineConfig) -> Path:
 
 def build(cfgs: list[EngineConfig] | EngineConfig, *, clock: Clock | None = None, settings: Settings | None = None,
           store: CandleStore | None = None, client=None, market: MarketDataProvider | None = None,
-          state_root: Path | None = None) -> Built:
+          state_root: Path | None = None, mcfg=None) -> Built:
     """One Account with one TradingEngine per instance config (all sharing data feed and broker)."""
     cfgs = [cfgs] if isinstance(cfgs, EngineConfig) else list(cfgs)
     g = cfgs[0]                                     # account-wide settings are identical in every instance config
@@ -95,14 +97,32 @@ def build(cfgs: list[EngineConfig] | EngineConfig, *, clock: Clock | None = None
     clock = clock or Clock()
     root = Path(state_root) if state_root else state_dir(g)
 
+    kite_data = None
     if g.mode == "PAPER" and client is None and market is None:
-        from trading_data.breeze.client import BreezeClient
-        client = BreezeClient(settings, store).connect()
+        from marketdata.config import MarketDataConfig
+        mcfg = mcfg or MarketDataConfig.from_env()
+        if mcfg.kite:
+            kite_data = mcfg
+        if not mcfg.kite or mcfg.breeze_fallback:
+            # Breeze stays the DataFeed's on-demand source for EXPIRED option history (zero-DTE walk-forward),
+            # which Kite does not serve; with Kite and no Breeze fallback the feed reads DuckDB only.
+            from trading_data.breeze.client import BreezeClient
+            client = BreezeClient(settings, store).connect()
     feed = DataFeed(settings, store, g.underlying, client if g.mode == "PAPER" else None)
     if market is None:
         if g.mode == "BACKTEST":
             from .replay import ReplayMarketData
             market = ReplayMarketData(feed)
+        elif kite_data is not None:
+            from marketdata.kite_provider import KiteMarketDataProvider
+            from marketdata.kite_stream import build_kite_stream
+            from zerodha.auth import access_token
+            zcfg = ZerodhaConfig.from_env()
+            access_token(zcfg)                      # LoginRequired now, not a silently price-less engine
+            stream = build_kite_stream(kite_data, zcfg).start()
+            market = KiteMarketDataProvider(stream.kite_factory, stream, settings, g.underlying,
+                                            min_refetch_s=g.bar_refetch_s,
+                                            historical_min_interval_s=kite_data.historical_min_interval_s)
         else:
             from trading_data.breeze.live import BreezeMarketData
             market = BreezeMarketData(client, settings, g.underlying,

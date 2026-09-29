@@ -181,7 +181,24 @@ column changes are applied automatically at start):
 
 ## Market data
 
-Zerodha's free Personal API has no quotes, so prices come from ICICI Breeze:
+`MARKET_DATA_PROVIDER` (see `marketdata/config.py`) picks the source.
+
+**KITE** (paid Kite Connect plan):
+- One KiteTicker WebSocket for the whole process (`marketdata/kite_stream.py`). Subscriptions are
+  refcounted, and a reconnect resubscribes everything held.
+- A watchdog rebuilds the connection when it gives up, goes stale (no heartbeat for
+  `KITE_STALE_SECONDS`) or the daily token changes. After 06:00 IST, or a 403, it waits for the next
+  `python3 -m zerodha login`.
+- Prices come from ticks. When the stream can't vouch for a price, `kite.ltp()` over REST is used
+  (batched, about 1 req/s). With `MARKET_DATA_FALLBACK=BREEZE`, Breeze is tried after that.
+- The pages get prices pushed over `GET /api/stream` (Server-Sent Events, `trader/stream.py`):
+  - LTP and running P&L of every trade of the day (open and closed) update on each tick.
+  - The dashboard is refetched only when trade or order state changes, instead of every 2s.
+  - The "Get LTP" and ↻ buttons are hidden while streaming.
+- SL, target, trailing and partial rules still run on the monitor tick (`TRADER_POLL_SECONDS`),
+  reading the latest tick.
+
+**BREEZE** (the default, as before): Zerodha's free Personal API has no quotes, so prices come from ICICI Breeze:
 - `get_quotes`, falling back to the last 1-minute bar
 - the same session file and client as the rest of the repository
 - calls are counted in the trader's SQLite file, not DuckDB, and capped by `TRADER_BREEZE_DAILY_BUDGET`

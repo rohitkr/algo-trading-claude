@@ -42,8 +42,12 @@ class InstrumentBook:
     def __init__(self, rows: Iterable[dict]):
         self._by_key: dict[tuple, Instrument] = {}
         self._by_symbol: dict[str, Instrument] = {}
+        self._futures: dict[str, list[tuple[date, int, str]]] = {}     # name -> (expiry, token, symbol)
         for r in rows:
             t = r.get("instrument_type")
+            if t == "FUT" and r.get("expiry"):
+                self._futures.setdefault(r["name"], []).append(
+                    (_date(r["expiry"]), int(r["instrument_token"]), r["tradingsymbol"]))
             if t not in RIGHT:
                 continue
             inst = Instrument(tradingsymbol=r["tradingsymbol"], name=r["name"], expiry=_date(r["expiry"]),
@@ -68,6 +72,10 @@ class InstrumentBook:
 
     def by_symbol(self, tradingsymbol: str) -> Instrument:
         return self._by_symbol[tradingsymbol]
+
+    def futures(self, underlying: str) -> list[tuple[date, int, str]]:
+        """(expiry, instrument_token, tradingsymbol) of the underlying's futures, nearest first."""
+        return sorted(self._futures.get(underlying, []))
 
     def expiries(self, underlying: str) -> list[date]:
         return sorted({k[1] for k in self._by_key if k[0] == underlying})

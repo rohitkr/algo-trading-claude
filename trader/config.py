@@ -10,7 +10,7 @@ Safety: TRADER_MODE defaults to PAPER (simulated exchange, no Zerodha orders). A
 | TRADER_DB                         | data/trader/trades.sqlite  | trades, orders, audit events (SQLite, WAL)               |
 | TRADER_AUDIT_DIR                  | logs/trader                | JSONL mirror of the audit events                         |
 | TRADER_PORT                       | 8765                       | web UI port; the server only binds 127.0.0.1             |
-| TRADER_UNDERLYINGS                | NIFTY,BANKNIFTY,FINNIFTY,SENSEX | instruments offered in the UI (need a Breeze [options.*] profile for prices) |
+| TRADER_UNDERLYINGS                | NIFTY,BANKNIFTY,FINNIFTY,SENSEX,CRUDEOIL,CRUDEOILM,GOLDM | instruments offered in the UI (MCX ones need MARKET_DATA_PROVIDER=KITE for prices) |
 | TRADER_PRODUCT                    | MIS                        | default product for new trades: MIS or NRML              |
 | **Monitoring**                    |                            |                                                          |
 | TRADER_POLL_SECONDS               | 3                          | monitor loop: order book + positions sync, rules         |
@@ -39,6 +39,9 @@ Safety: TRADER_MODE defaults to PAPER (simulated exchange, no Zerodha orders). A
 | TRADER_TRADING_START              | 09:15                      | no entries before (blank = off)                          |
 | TRADER_TRADING_END                | 15:00                      | no entries after (blank = off)                           |
 | TRADER_SQUARE_OFF_TIME            | 15:15                      | every open trade is exited (AUTO_EXIT); blank = off, allowed for NRML only |
+| TRADER_MCX_TRADING_START / _END   | 09:00 / 23:15              | entry window for MCX underlyings (CRUDEOIL, CRUDEOILM, GOLDM) |
+| TRADER_MCX_SQUARE_OFF_TIME        | 23:20                      | square-off for MCX trades (MCX closes 23:30, 23:55 in US winter) |
+| TRADER_LOT_UNITS_<NAME>           | CRUDEOIL 100, CRUDEOILM 10, GOLDM 10 | units per MCX lot (Kite quantities are in lots; P&L needs units) |
 | TRADER_MAX_ENTRY_DEVIATION_PCT    | 20                         | entry limit vs Breeze LTP (fat-finger guard; 0 = off)    |
 | TRADER_REQUIRE_LTP_FOR_ENTRY      | true                       | refuse entries when no Breeze price is available         |
 | TRADER_FREEZE_QTY_<UNDERLYING>    | NIFTY 1800, BANKNIFTY 900, FINNIFTY 1800, SENSEX 1000 | orders above this are refused (no slicing) |
@@ -59,12 +62,20 @@ from zerodha.config import _env_value, read_env_file
 
 MODES = ("PAPER", "LIVE")
 DEFAULT_FREEZE = {"NIFTY": 1800, "BANKNIFTY": 900, "FINNIFTY": 1800, "MIDCPNIFTY": 2800, "SENSEX": 1000,
-                  "BANKEX": 900}
+                  "BANKEX": 900,
+                  # MCX, in units (barrels / 10 g): max order size per trade, 100 lots of each
+                  "CRUDEOIL": 10000, "CRUDEOILM": 1000, "GOLDM": 1000}
 BFO_UNDERLYINGS = {"SENSEX", "BANKEX", "SENSEX50"}
+# MCX commodity options. Kite's instrument dump says lot_size 1 and Kite takes MCX order quantities in LOTS,
+# but a lot is many units: premium is quoted per barrel (crude) / per 10 g (gold), so P&L per lot = price x
+# units. The trader works in units everywhere (quantity = lots x units, P&L = qty x price, like NFO) and
+# converts to lots only at the Kite boundary (trader/broker.py). TRADER_LOT_UNITS_<NAME> overrides / adds one.
+MCX_LOT_UNITS = {"CRUDEOIL": 100, "CRUDEOILM": 10, "GOLDM": 10}
 
 
 def exchange_for(underlying: str) -> str:
-    return "BFO" if underlying.upper() in BFO_UNDERLYINGS else "NFO"
+    u = underlying.upper()
+    return "BFO" if u in BFO_UNDERLYINGS else "MCX" if u in MCX_LOT_UNITS else "NFO"
 
 
 def _bool(v) -> bool:
@@ -92,7 +103,7 @@ class TraderConfig:
     db_path: Path = Path("data/trader/trades.sqlite")
     audit_dir: Path = Path("logs/trader")
     port: int = 8765
-    underlyings: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX")
+    underlyings: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "CRUDEOIL", "CRUDEOILM", "GOLDM")
     product: str = "MIS"
     # monitoring
     poll_seconds: float = 3.0
@@ -121,6 +132,11 @@ class TraderConfig:
     trading_start: time | None = time(9, 15)
     trading_end: time | None = time(15, 0)
     square_off_time: time | None = time(15, 15)
+    # MCX runs 09:00-23:30 (23:55 when the US is off daylight saving): its own entry window / square-off
+    mcx_trading_start: time | None = time(9, 0)
+    mcx_trading_end: time | None = time(23, 15)
+    mcx_square_off_time: time | None = time(23, 20)
+    lot_units: dict = field(default_factory=lambda: dict(MCX_LOT_UNITS))
     max_entry_deviation_pct: float = 20.0
     require_ltp_for_entry: bool = True
     freeze_qty: dict = field(default_factory=lambda: dict(DEFAULT_FREEZE))
@@ -148,6 +164,12 @@ class TraderConfig:
     def freeze_for(self, underlying: str) -> int:
         return int(self.freeze_qty.get(underlying.upper(), 1800))
 
+    def session_for(self, underlying: str) -> tuple[time | None, time | None, time | None]:
+        """(entry start, entry end, square-off) for this underlying's exchange."""
+        if exchange_for(underlying) == "MCX":
+            return self.mcx_trading_start, self.mcx_trading_end, self.mcx_square_off_time
+        return self.trading_start, self.trading_end, self.square_off_time
+
     @classmethod
     def from_env(cls, env_file: str | Path | None = ".env", environ: dict | None = None) -> "TraderConfig":
         env = load_env(env_file, environ)
@@ -159,7 +181,13 @@ class TraderConfig:
                 freeze[k[len("TRADER_FREEZE_QTY_"):].upper()] = int(v)
         times = {k: (_opt_time(env[k]) if k in env else default) for k, default in
                  (("TRADER_TRADING_START", d.trading_start), ("TRADER_TRADING_END", d.trading_end),
-                  ("TRADER_SQUARE_OFF_TIME", d.square_off_time))}
+                  ("TRADER_SQUARE_OFF_TIME", d.square_off_time), ("TRADER_MCX_TRADING_START", d.mcx_trading_start),
+                  ("TRADER_MCX_TRADING_END", d.mcx_trading_end),
+                  ("TRADER_MCX_SQUARE_OFF_TIME", d.mcx_square_off_time))}
+        units = dict(MCX_LOT_UNITS)
+        for k, v in env.items():
+            if k.startswith("TRADER_LOT_UNITS_") and v.strip():
+                units[k[len("TRADER_LOT_UNITS_"):].upper()] = int(v)
         return cls(
             mode=g("TRADER_MODE", "PAPER").strip().strip("'\"").upper(),
             enable_live_trading=_bool(g("ENABLE_LIVE_TRADING", "false")),
@@ -197,6 +225,10 @@ class TraderConfig:
             max_entry_deviation_pct=float(g("TRADER_MAX_ENTRY_DEVIATION_PCT", d.max_entry_deviation_pct)),
             require_ltp_for_entry=_bool(g("TRADER_REQUIRE_LTP_FOR_ENTRY", "true")),
             freeze_qty=freeze,
+            mcx_trading_start=times["TRADER_MCX_TRADING_START"],
+            mcx_trading_end=times["TRADER_MCX_TRADING_END"],
+            mcx_square_off_time=times["TRADER_MCX_SQUARE_OFF_TIME"],
+            lot_units=units,
             confirm_token_s=float(g("TRADER_CONFIRM_TOKEN_SECONDS", d.confirm_token_s)),
             paper_state=Path(g("TRADER_PAPER_STATE", str(d.paper_state))),
             paper_slippage=float(g("TRADER_PAPER_SLIPPAGE_POINTS", d.paper_slippage)),

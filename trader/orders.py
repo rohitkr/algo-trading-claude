@@ -63,7 +63,8 @@ class OrderPlacer:
         if not order.get("broker_order_id") or is_terminal(order["status"]) or order["status"] in LOCAL_PENDING:
             return False
         try:
-            self.broker.modify(order["broker_order_id"], **kw)
+            self.broker.modify(order["broker_order_id"], exchange=order.get("exchange"),
+                               tradingsymbol=order.get("tradingsymbol"), **kw)
         except Exception as exc:
             self.audit(order["trade_id"], "ORDER_MODIFY_FAILED", "WARNING",
                        {"order_id": order["broker_order_id"], "kind": order["kind"], "changes": kw,

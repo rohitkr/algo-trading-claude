@@ -33,12 +33,13 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
     add("not_halted", not halted, halted or "")
     t = now.time()
     add("weekday", now.weekday() < 5, f"{now:%A}")
-    if cfg.trading_start:
-        add("trading_start", t >= cfg.trading_start, f"now {t:%H:%M}, start {cfg.trading_start:%H:%M}")
-    if cfg.trading_end:
-        add("trading_end", t <= cfg.trading_end, f"now {t:%H:%M}, end {cfg.trading_end:%H:%M}")
-    if cfg.square_off_time:
-        add("before_square_off", t < cfg.square_off_time, f"square-off {cfg.square_off_time:%H:%M}")
+    start, end, square_off = cfg.session_for(underlying)       # MCX has its own evening session
+    if start:
+        add("trading_start", t >= start, f"now {t:%H:%M}, start {start:%H:%M}")
+    if end:
+        add("trading_end", t <= end, f"now {t:%H:%M}, end {end:%H:%M}")
+    if square_off:
+        add("before_square_off", t < square_off, f"square-off {square_off:%H:%M}")
     n_open = len([x for x in open_trades if x["status"] in L.OPEN_STATUSES])
     add("max_open_trades", n_open < cfg.max_open_trades, f"{n_open} open, limit {cfg.max_open_trades}")
     add("max_trades_per_day", trades_today < cfg.max_trades_per_day,
@@ -66,7 +67,7 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
         add("no_outside_position", broker_net == 0 or bool(mine),
             f"Zerodha already shows {broker_net} of {tradingsymbol} not opened here" if broker_net and not mine else "")
     if ltp is None:
-        add("ltp_available", not cfg.require_ltp_for_entry, "no Breeze price for this contract")
+        add("ltp_available", not cfg.require_ltp_for_entry, "no live price for this contract")
     elif cfg.max_entry_deviation_pct:
         dev = abs(entry - ltp) / ltp * 100
         add("entry_near_ltp", dev <= cfg.max_entry_deviation_pct,

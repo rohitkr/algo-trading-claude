@@ -67,6 +67,9 @@ async function onUnderlying() {
   if (info.error) $("#form-hint").textContent = info.error;
   $("#price-symbol").textContent = $("#underlying").value;
   $("#price-value").textContent = "–";
+  $("#price-value").dataset.price = `SPOT:${$("#underlying").value}`;     // live.js keeps it current
+  $("#price-value").dataset.fmt = "money";
+  watchPrices();
   SPOT = null;
   await refreshSpot();               // the strike list below is built from THIS spot, so wait for it first
   await onExpiry();
@@ -77,6 +80,8 @@ async function refreshSpot(force) {
     const s = await api(`/api/spot?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent($("#underlying").value)}`);
     SPOT = s.spot;
     $("#price-value").textContent = s.spot == null ? "no price" : money(s.spot);
+    $("#price-value").title = s.error || "";
+    if (s.error) $("#form-hint").textContent = s.error;
   } catch (e) { SPOT = null; $("#price-value").textContent = "–"; }
 }
 
@@ -116,6 +121,9 @@ async function onContract() {
     const c = await api(`/api/contract?underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
     LOT = c.lot_size; SYMBOL = c.tradingsymbol;
     $("#opt-ltp").textContent = "–";
+    $("#opt-ltp").dataset.price = `${c.exchange}:${c.tradingsymbol}`;
+    $("#opt-ltp").dataset.fmt = "money";
+    watchPrices();
     $("#pp-symbol").value = c.tradingsymbol;
     refreshOptionLtp();               // auto: this contract's own LTP, no click needed
   } catch (e) { LOT = null; $("#opt-ltp").textContent = "–"; $("#form-hint").textContent = e.message; }
@@ -297,6 +305,14 @@ async function editFlow(tid) {
 const BAD = new Set(["ERROR", "UNKNOWN_REQUIRES_RECONCILIATION", "MANUALLY_EXITED", "REJECTED"]);
 const cls = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
 
+// Pushed prices: the form's spot + contract (trades stream for every page without asking).
+function watchPrices() { Live.watch([$("#price-value").dataset.price, $("#opt-ltp").dataset.price]); }
+Live.onPrice((k, px) => { if (k === $("#price-value").dataset.price) SPOT = px; });
+// Only touch the DOM when a table's markup actually changed (a dashboard refetch after an unrelated change
+// must not rebuild every row, lose hover/selection or restart CSS transitions).
+function setHTML(el, html) { if (el._html !== html) { el.innerHTML = html; el._html = html; } }
+const ltpCell = (t) => `<span data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</span>`;
+
 async function refresh() {
   let d;
   try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "Server unreachable: " + e.message; return; }
@@ -309,31 +325,31 @@ async function refresh() {
   const rb = $("#resume"); if (rb) rb.onclick = async () => { if (confirm("Allow new trades again?")) { await api("/api/resume", {}); refresh(); } };
   $("#paper-price").classList.toggle("hidden", !(d.mode === "PAPER" && d.quotes.source === "manual"));
 
-  $("#active tbody").innerHTML = d.active.map((t) => {
+  setHTML($("#active tbody"), d.active.map((t) => {
     const working = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status);
     const canExit = !["ERROR", "UNKNOWN_REQUIRES_RECONCILIATION"].includes(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
     const sl = t.current_sl !== t.initial_sl ? `${num(t.current_sl)} <small>(was ${num(t.initial_sl)})</small>` : num(t.current_sl);
     return `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td><td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td>
       <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-      <td>${num(t.kite_ltp ?? t.last_ltp)}${t.kite_ltp != null ? ' <small title="from Zerodha positions()">K</small>' : ""}</td>
+      <td>${ltpCell(t)}</td>
       <td>${sl}${t.sl_software_only ? " ⚠" : ""}</td>
       <td>${num(t.target)}</td><td>${t.quantity}</td><td>${t.filled_qty}${t.open_qty !== t.filled_qty ? ` (open ${t.open_qty})` : ""}</td>
-      <td class="${cls(t.pnl)}">${money(t.pnl)}</td><td class="${cls(t.pnl)}">${t.pnl_pct == null ? "–" : t.pnl_pct + "%"}</td>
+      <td class="${cls(t.pnl)}" data-trade-pnl="${t.id}">${money(t.pnl)}</td><td class="${cls(t.pnl)}" data-trade-pnlpct="${t.id}">${t.pnl_pct == null ? "–" : t.pnl_pct + "%"}</td>
       <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</span></td>
       <td>${tm(t.entry_time)}</td><td>${tm(t.updated_at)}</td>
       <td>${working ? `<button data-act="CANCEL" data-id="${t.id}">Cancel entry</button>` : ""}
           ${canEdit(t) ? `<button data-act="EDIT" data-id="${t.id}">Edit</button>` : ""}
           ${canExit ? `<button data-act="EXIT" data-id="${t.id}" class="danger">Exit</button>` : ""}</td></tr>`;
-  }).join("") || `<tr><td colspan="15">No active trades</td></tr>`;
+  }).join("") || `<tr><td colspan="15">No active trades</td></tr>`);
 
-  $("#completed tbody").innerHTML = d.completed.map((t) => `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td>
+  setHTML($("#completed tbody"), d.completed.map((t) => `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td>
     <td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td><td>${num(t.entry_avg_price ?? t.entry_price)}</td>
     <td>${num(t.exit_avg_price)}</td>
-    <td>${num(t.kite_ltp ?? t.last_ltp)}${t.kite_ltp != null ? ' <small title="from Zerodha positions()">K</small>' : ""}</td>
-    <td>${t.filled_qty}/${t.quantity}</td><td class="${cls(t.pnl)}">${money(t.pnl)}</td>
+    <td>${ltpCell(t)}</td>
+    <td>${t.filled_qty}/${t.quantity}</td><td class="${cls(t.pnl)}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
     <td>${esc(t.exit_reason || t.error || "")}</td><td>${t.duration_s ? Math.round(t.duration_s / 60) + " min" : "–"}</td>
     <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}</span></td></tr>`).join("") ||
-    `<tr><td colspan="11">None yet</td></tr>`;
+    `<tr><td colspan="11">None yet</td></tr>`);
 
   const s = d.system, v = (k) => (s[k] || {}).value;
   const broker = v("broker") || {}, rec = v("reconciliation") || {}, proc = v("process") || {};
@@ -341,14 +357,27 @@ async function refresh() {
     ["Mode", d.mode], ["Zerodha", broker.ok ? `<span class="ok">connected</span> (${esc(d.broker)})` : `<span class="err">${esc(broker.last_error || "not synced")}</span>`],
     ["Last broker sync", tm(broker.last_sync)], ["Active trades", d.active.length],
     ["Reconciliation", rec.at ? `${tm(rec.at)} · mismatches ${rec.pending_mismatches} · need attention ${rec.needs_attention}` : "–"],
-    ["Prices", `${esc(d.quotes.source)} ${d.quotes.last_ok ? "· last " + tm(d.quotes.last_ok) : ""}${d.quotes.api_budget_remaining != null ? " · budget " + d.quotes.api_budget_remaining : ""}`],
+    ["Prices", `<span id="prices-status">${pricesText(d.quotes)}</span>`],
     ["Daily P&L", money(v("daily_pnl"))], ["Trades today", `${d.trades_today} / ${d.risk_limits.max_trades_per_day}`],
     ["Last error", `<span class="err">${esc(v("last_error") || d.quotes.last_error || "–")}</span>`],
     ["Process", `${esc(proc.state || "?")} since ${tm(proc.started_at)} · heartbeat ${tm(v("heartbeat"))}`],
-    ["Limits", `open ≤ ${d.risk_limits.max_open_trades}, loss/day ${money(d.risk_limits.max_daily_loss)}, loss/trade ${money(d.risk_limits.max_loss_per_trade)}, window ${d.risk_limits.trading_window.join("–")}, square-off ${d.risk_limits.square_off_time || "off"}`],
+    ["Limits", `open ≤ ${d.risk_limits.max_open_trades}, loss/day ${money(d.risk_limits.max_daily_loss)}, loss/trade ${money(d.risk_limits.max_loss_per_trade)}, window ${d.risk_limits.trading_window.join("–")}, square-off ${d.risk_limits.square_off_time || "off"}${d.risk_limits.mcx ? ` · MCX ${d.risk_limits.mcx[0]}–${d.risk_limits.mcx[1]}, square-off ${d.risk_limits.mcx[2] || "off"}` : ""}`],
   ];
-  $("#system").innerHTML = rows.map(([k, x]) => `<div><span>${k}</span><span class="v">${x}</span></div>`).join("");
+  setHTML($("#system"), rows.map(([k, x]) => `<div><span>${k}</span><span class="v">${x}</span></div>`).join(""));
+  Live.reapply();
 }
+
+function pricesText(q) {
+  if (!q) return "–";
+  if (q.source === "kite") {
+    const state = q.session_expired ? `<span class="err">Kite session expired: run python3 -m zerodha login</span>`
+      : q.streaming ? `<span class="ok">streaming</span> · ${q.subscribed} instruments`
+      : `<span class="err">${q.connected ? "stale" : "not connected"}</span> · REST fallback`;
+    return `kite ${state}${q.last_ok ? " · last tick " + tm(q.last_ok) : ""}${q.fallback ? " · fallback " + esc(q.fallback.source) : ""}`;
+  }
+  return `${esc(q.source)} ${q.last_ok ? "· last " + tm(q.last_ok) : ""}${q.api_budget_remaining != null ? " · budget " + q.api_budget_remaining : ""}`;
+}
+Live.onStatus((q) => { const el = $("#prices-status"); if (el) el.innerHTML = pricesText(q); });
 
 document.addEventListener("click", async (ev) => {
   const btn = ev.target.closest("button[data-act]");
@@ -376,5 +405,9 @@ $("#pp-set").onclick = async () => {
 };
 
 loadMeta().catch((e) => { $("#form-hint").textContent = "Could not load instruments: " + e.message; });
+// No polling: the server pushes a "dashboard" event whenever trade/order state changes (and on reconnect).
+// A slow refresh stays as a safety net for anything that is not a trade (e.g. system rows).
+Live.onDashboard(refresh);
+Live.start();
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 30000);

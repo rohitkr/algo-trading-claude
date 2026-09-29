@@ -1,4 +1,9 @@
-"""Option prices for monitoring. Zerodha's free Personal API has no quotes, so prices come from ICICI Breeze.
+"""Option prices for monitoring: KiteQuotes (MARKET_DATA_PROVIDER=KITE, the paid Kite Connect plan's WebSocket)
+or BreezeQuotes (MARKET_DATA_PROVIDER=BREEZE, the default; Zerodha's free Personal API has no quotes).
+
+KiteQuotes reads the process-wide marketdata.KiteStream: a subscribed instrument's price is the latest tick
+(no call, no budget); anything else, or a stale stream, is priced by kite.ltp() over REST, and only then by
+the optional Breeze fallback (MARKET_DATA_FALLBACK=BREEZE).
 
 BreezeQuotes reuses trading_data.breeze.client.BreezeClient (same session token file, throttle, retries):
 get_quotes for the LTP, and the last completed 1-minute bar (historical_data_v2) when the quote is empty.
@@ -178,3 +183,67 @@ class BreezeQuotes:
                 "calls_this_run": self.calls,
                 "interval_s": None if self.last_interval in (None, float("inf")) else round(self.last_interval, 1),
                 "budget_exhausted": self.last_interval == float("inf")}
+
+
+class KiteQuotes:
+    """QuoteSource over marketdata.KiteStream. Every instrument asked for is kept subscribed while it keeps
+    being asked for (released `idle_s` after the last request), so the monitor's open trades and a leg
+    being watched in the UI stream, while a strike browsed once in the form does not stay subscribed.
+    max_age is irrelevant for a live stream (a tick is always the current price); it bounds the REST cache."""
+    name = "kite"
+    OWNER = "quotes"
+
+    def __init__(self, stream, fallback=None, idle_s: float = 300.0, monotonic=_time.monotonic, spot_resolver=None):
+        self.stream, self.fallback, self.idle_s, self.monotonic = stream, fallback, idle_s, monotonic
+        self.spot_resolver = spot_resolver
+        self._asked: dict[int, float] = {}
+        self._lock = threading.Lock()
+        self.fallback_used = 0
+
+    def _keep(self, token: int) -> None:
+        now = self.monotonic()
+        with self._lock:
+            new = token not in self._asked
+            self._asked[token] = now
+            idle = [t for t, at in self._asked.items() if now - at > self.idle_s]
+            for t in idle:
+                del self._asked[t]
+        if new:
+            self.stream.acquire([token], owner=self.OWNER)
+        if idle:
+            self.stream.release(idle, owner=self.OWNER)
+
+    def token(self, inst: Instrument) -> int:
+        return int(inst.instrument_token)
+
+    def spot_token(self, underlying: str) -> int:
+        if self.spot_resolver is not None:        # app wiring: index token, or the MCX future
+            return int(self.spot_resolver(underlying))
+        from marketdata import index_token
+        return index_token(underlying)
+
+    def ltp(self, inst: Instrument, max_age: float | None = None) -> float | None:
+        tok = self.token(inst)
+        self._keep(tok)
+        px = self.stream.ltp(tok, max_age)
+        if px is None and self.fallback is not None:
+            self.fallback_used += 1
+            px = self.fallback.ltp(inst, max_age)
+        return px
+
+    def spot(self, underlying: str, max_age: float | None = None) -> float | None:
+        tok = self.spot_token(underlying)
+        self._keep(tok)
+        px = self.stream.ltp(tok, max_age)
+        if px is None and self.fallback is not None:
+            self.fallback_used += 1
+            px = self.fallback.spot(underlying, max_age)
+        return px
+
+    def status(self) -> dict:
+        st = dict(self.stream.status())
+        if self.fallback is not None:
+            fb = self.fallback.status()
+            st["fallback"] = {"source": fb.get("source"), "ok": fb.get("ok"), "used": self.fallback_used,
+                              "api_budget_remaining": fb.get("api_budget_remaining")}
+        return st

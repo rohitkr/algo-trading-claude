@@ -58,8 +58,12 @@ def main(argv: list[str] | None = None) -> int:
         app.service.resume()
         print("new trades allowed again")
         return 0
+    if app.stream is not None:
+        app.stream.start()                         # KiteTicker: connects in the background, REST until then
     res = app.service.startup()                    # recovery + reconciliation before anything else
     if args.command == "reconcile":
+        if app.stream is not None:
+            app.stream.stop()
         print(json.dumps(res), json.dumps(app.service.dashboard()["system"], default=str, indent=1))
         return 0
 
@@ -67,7 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     from .web.server import make_server
     port = args.port or cfg.port
     srv = make_server(app, port)
-    mon = Monitor(app.service, cfg.poll_seconds)
+    mon = Monitor(app.service, cfg.poll_seconds, after_tick=app.hub.after_tick)
+    app.hub.start()
     mon.start()
     banner = "LIVE TRADING - REAL ORDERS" if cfg.live else "PAPER (simulated exchange)"
     print(f"\n  {banner}\n  Open http://127.0.0.1:{port}  (Ctrl-C stops; resting SL orders stay at Zerodha)\n")
@@ -77,6 +82,9 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         mon.stop()
+        app.hub.stop()
+        if app.stream is not None:
+            app.stream.stop()
         srv.server_close()
         app.repo.set_status_value("process", {"state": "stopped", "stopped_at": app.repo.now(), "mode": cfg.mode})
     return 0

@@ -1061,7 +1061,8 @@ class TradeService:
         # as any other open trade, until their own auto-exit time, SL, target or a manual exit closes them.
         if t.get("order_type") == "BTST":
             return None
-        if self.cfg.square_off_time and now.time() >= self.cfg.square_off_time:
+        square_off = self.cfg.session_for(t["underlying"])[2]
+        if square_off and now.time() >= square_off:
             return L.SQUARE_OFF
         return None
 
@@ -1225,7 +1226,8 @@ class TradeService:
                                     "max_qty_per_trade": self.cfg.max_qty_per_trade,
                                     "trading_window": [self.cfg.trading_start.strftime("%H:%M") if self.cfg.trading_start else None,
                                                        self.cfg.trading_end.strftime("%H:%M") if self.cfg.trading_end else None],
-                                    "square_off_time": self.cfg.square_off_time.strftime("%H:%M") if self.cfg.square_off_time else None},
+                                    "square_off_time": self.cfg.square_off_time.strftime("%H:%M") if self.cfg.square_off_time else None,
+                                    "mcx": [x.strftime("%H:%M") if x else None for x in self.cfg.session_for("CRUDEOIL")]},
                     "trades_today": self.repo.confirmed_on(self.clock().date())}
 
     def meta(self) -> dict:
@@ -1260,6 +1262,9 @@ class TradeService:
         state internally, so holding the service-wide lock here would only serialize unrelated legs'
         concurrent "refresh price" clicks behind each other for no reason (see market.py's _quote())."""
         px = None
+        note = self._no_price_source(underlying)
+        if note:
+            return {"underlying": underlying, "spot": None, "error": note}
         if with_ltp and hasattr(self.quotes, "spot"):
             try:
                 px = self.quotes.spot(underlying, max_age=0 if force else self.cfg.quote_ttl_s)
@@ -1267,12 +1272,20 @@ class TradeService:
                 self.repo.set_status_value("last_error", f"spot {underlying}: {exc}")
         return {"underlying": underlying, "spot": px}
 
+    def _no_price_source(self, underlying: str) -> str | None:
+        """Why this underlying can have no price at all with the configured source (else None)."""
+        if exchange_for(underlying) == "MCX" and getattr(self.quotes, "name", "") not in ("kite", "manual"):
+            return "MCX prices come only from Kite: set MARKET_DATA_PROVIDER=KITE in .env and restart"
+        return None
+
     def contract(self, underlying: str, expiry: str, strike: float, option_type: str, with_ltp: bool = False,
                 force: bool = False) -> dict:
         """Contract details; the Breeze price only when asked (the form's "Get LTP" button), not on every
         change. force=True: see spot()'s docstring - an explicit refresh always gets a fresh Breeze call.
         No self.lock either, for the same reason as spot() - see its docstring."""
         inst = self.instruments.resolve(underlying, date.fromisoformat(expiry), strike, option_type)
+        note = self._no_price_source(underlying)
         return {"tradingsymbol": inst.tradingsymbol, "exchange": inst.exchange, "lot_size": inst.lot_size,
-                "tick_size": inst.tick_size,
-                "ltp": self._ltp_safe(inst, max_age=0 if force else self.cfg.quote_ttl_s) if with_ltp else None}
+                "tick_size": inst.tick_size, "price_error": note,
+                "ltp": self._ltp_safe(inst, max_age=0 if force else self.cfg.quote_ttl_s)
+                if with_ltp and not note else None}

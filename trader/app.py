@@ -11,7 +11,7 @@ from trading_data.breeze.session_store import now_ist
 from .broker import build_broker
 from .config import TraderConfig
 from .instruments import InstrumentService, kite_loader
-from .market import BreezeQuotes, ManualQuotes
+from .market import BreezeQuotes, KiteQuotes, ManualQuotes
 from .paper import PaperExchange
 from .repository import Repository
 from .service import TradeService
@@ -33,6 +33,8 @@ class App:
     quotes: object
     lock_fh: object
     strategies: StrategyService
+    stream: object = None          # marketdata.KiteStream (MARKET_DATA_PROVIDER=KITE), else None
+    hub: object = None             # trader.stream.TickHub: pushes ticks / dashboard changes to the pages
 
 
 def single_instance_lock(db_path: Path):
@@ -49,7 +51,9 @@ def single_instance_lock(db_path: Path):
     return fh
 
 
-def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist) -> App:
+def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist, mcfg=None) -> App:
+    from marketdata.config import MarketDataConfig
+    mcfg = mcfg or MarketDataConfig.from_env()
     lock = single_instance_lock(cfg.db_path)
     repo = Repository(cfg.db_path, clock)
     from zerodha.config import ZerodhaConfig
@@ -66,14 +70,23 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist) -> App:
         from zerodha.auth import new_kite
         return new_kite(zcfg) if zcfg.api_key else _PublicInstruments()
 
-    instruments = InstrumentService(kite_loader(kite_for_instruments), cfg.underlyings, clock)
+    instruments = InstrumentService(kite_loader(kite_for_instruments), cfg.underlyings, clock, cfg.lot_units)
 
+    def breeze_quotes():
+        from trading_data.config import load_settings
+        return BreezeQuotes(load_settings(), repo, cfg.breeze_daily_budget, cfg.quote_ttl_s, clock=clock,
+                            reserve=cfg.breeze_reserve)
+
+    stream = None
     if cfg.mode == "PAPER" and cfg.paper_quotes == "manual":
         quotes = ManualQuotes()
+    elif mcfg.kite:
+        from marketdata.kite_stream import build_kite_stream
+        stream = build_kite_stream(mcfg, zcfg)             # one KiteTicker for this whole process
+        quotes = KiteQuotes(stream, breeze_quotes() if mcfg.breeze_fallback else None,
+                            spot_resolver=lambda u: _spot_token(instruments, u))
     else:
-        from trading_data.config import load_settings
-        quotes = BreezeQuotes(load_settings(), repo, cfg.breeze_daily_budget, cfg.quote_ttl_s, clock=clock,
-                              reserve=cfg.breeze_reserve)
+        quotes = breeze_quotes()
 
     paper = None
     if cfg.mode == "PAPER":
@@ -82,13 +95,25 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist) -> App:
             return quotes.ltp(instruments.by_symbol(exchange, symbol), max_age=cfg.quote_slow_s)
         paper = PaperExchange(price, cfg.paper_state, clock=clock, slippage=cfg.paper_slippage)
         broker = build_broker(cfg, cli_live=cli_live, paper_kite=paper)
+    broker.units = instruments.units_per_lot      # MCX: Kite quantities are lots, the trader counts units
 
     from live.audit import AuditLog
     audit = AuditLog(cfg.audit_dir, cfg.mode, clock=clock, instance="trader")
     svc = TradeService(cfg, repo, broker, instruments, quotes, clock, audit_log=audit)
     strategies = StrategyService(svc, repo)
     svc.extra_tick = strategies.tick        # combined-P&L rules run right after the per-trade engine, every tick
-    return App(cfg, svc, repo, paper, quotes, lock, strategies)
+    from .stream import TickHub
+    return App(cfg, svc, repo, paper, quotes, lock, strategies, stream, TickHub(svc, quotes))
+
+
+def _spot_token(instruments: InstrumentService, underlying: str) -> int:
+    """Index token for NSE/BSE underlyings; for MCX (no index) the future the options are written on."""
+    from marketdata import index_token
+
+    from .config import exchange_for
+    if exchange_for(underlying) == "MCX":
+        return instruments.spot_future(underlying)[0]
+    return index_token(underlying)
 
 
 class _PublicInstruments:

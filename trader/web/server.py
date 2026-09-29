@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..service import ActionError
+from ..stream import sse
 
 log = logging.getLogger("trader.web")
 STATIC = Path(__file__).parent / "static"
@@ -70,7 +72,10 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path.startswith("/static/"):
                     return self._file(u.path[len("/static/"):])
                 if u.path == "/api/meta":
-                    return self._json(200, svc.meta())
+                    hub = getattr(app, "hub", None)
+                    return self._json(200, {**svc.meta(), "streaming": bool(hub and hub.streaming)})
+                if u.path == "/api/stream":
+                    return self._stream()
                 if u.path == "/api/dashboard":
                     return self._json(200, svc.dashboard())
                 if u.path == "/api/strikes":
@@ -109,6 +114,37 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             except Exception as exc:
                 log.exception("GET %s", self.path)
                 return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+        def _stream(self) -> None:
+            """Server-Sent Events (trader/stream.py): held open until the page goes away or the server stops."""
+            hub = getattr(app, "hub", None)
+            if hub is None:
+                return self._json(404, {"error": "no stream"})
+            client = hub.connect()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                self.wfile.write(b"retry: 2000\n\n")
+                self.wfile.flush()
+                while not client.closed:
+                    try:
+                        event, data = client.q.get(timeout=15)
+                    except queue.Empty:
+                        self.wfile.write(b": keep-alive\n\n")      # also detects a closed page
+                        self.wfile.flush()
+                        continue
+                    if event == "bye":
+                        break
+                    self.wfile.write(sse(event, data))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                hub.disconnect(client)
+            self.close_connection = True
 
         def _file(self, name: str) -> None:
             p = (STATIC / name).resolve()
@@ -157,6 +193,11 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                     if action == "cancel":
                         return self._json(200, svc.cancel_entry(tid, str(body.get("token", ""))))
                     return self._json(200, svc.request_exit(tid, str(body.get("token", ""))))
+                if u.path == "/api/stream/watch":
+                    hub = getattr(app, "hub", None)
+                    if hub is None:
+                        return self._json(404, {"error": "no stream"})
+                    return self._json(200, hub.watch(int(body["client"]), list(body.get("keys") or [])))
                 if u.path == "/api/resume":
                     svc.resume()
                     return self._json(200, {"ok": True})

@@ -219,3 +219,5 @@ dialog table td:first-child { color: var(--muted); }
 menu { display: flex; justify-content: flex-end; gap: 8px; }
 
 .hidden { display: none !important; }
+/* live.js: LTP / spot are pushed while streaming, so their manual refresh buttons are hidden */
+.live-prices #refresh-spot, .live-prices .ltp-refresh { display: none; }

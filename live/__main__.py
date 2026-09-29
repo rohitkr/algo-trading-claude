@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
 def run(cfgs: list[EngineConfig], warnings: list[str]) -> int:
     from trading_data.breeze.client import BreezeError, SessionExpiredError
     from trading_data.config import load_settings
+    from zerodha.auth import LoginRequired
 
     from .app import build, setup_live_logging
 
@@ -86,6 +87,9 @@ def run(cfgs: list[EngineConfig], warnings: list[str]) -> int:
     except BreezeError as exc:
         print(f"Breeze: {exc}")
         return 1
+    except LoginRequired as exc:
+        print(f"Kite: {exc}")
+        return 3
     for iid, inst in built.instances.items():
         print(f"{g.mode} {iid}: {json.dumps(inst.summary())}")
     print(f"broker={built.account.broker.name} (real orders: {built.account.broker.live}). Ctrl-C stops "

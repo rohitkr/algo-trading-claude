@@ -1,4 +1,10 @@
-"""Tradingsymbol, lot size and tick size from Kite's daily instrument dump (NFO and BFO), never hardcoded.
+"""Tradingsymbol, lot size and tick size from Kite's daily instrument dump (NFO, BFO, MCX), never hardcoded.
+
+MCX: Kite lists every commodity option with lot_size 1 (its order quantities are in lots), so the MCX book
+is rewritten with lot_size = units per lot (TraderConfig.lot_units: CRUDEOIL 100 barrels, GOLDM 10 x 10 g):
+the trader then counts units like on NFO and trader/broker.py converts to lots for Kite. An MCX underlying
+without a configured unit count is left out rather than traded at a wrong size. MCX has no index: its
+"spot" is the futures contract the nearest option expiry is written on.
 
 zerodha.instruments.InstrumentBook.from_kite caches each exchange's dump per day in
 data/kite_instruments_<EXCH>_<date>.csv; this service reloads when the date changes. SENSEX/BANKEX
@@ -11,6 +17,8 @@ import logging
 from datetime import date
 from pathlib import Path
 from typing import Callable
+
+from dataclasses import replace
 
 from zerodha.instruments import Instrument, InstrumentBook
 
@@ -36,8 +44,10 @@ def kite_loader(kite_factory: Callable[[], object], cache_dir: str | Path = "dat
 
 
 class InstrumentService:
-    def __init__(self, loader: Callable[[str, date], tuple[InstrumentBook, str]], underlyings, clock):
+    def __init__(self, loader: Callable[[str, date], tuple[InstrumentBook, str]], underlyings, clock,
+                 lot_units: dict | None = None):
         self.loader, self.underlyings, self.clock = loader, tuple(underlyings), clock
+        self.lot_units = {k.upper(): int(v) for k, v in (lot_units or {}).items()}
         self._books: dict[str, tuple[date, InstrumentBook, str]] = {}
 
     def book(self, exchange: str) -> InstrumentBook:
@@ -45,9 +55,42 @@ class InstrumentService:
         cached = self._books.get(exchange)
         if cached is None or cached[0] != today:
             book, source = self.loader(exchange, today)
+            if exchange == "MCX":
+                book = self._mcx_units(book)
             self._books[exchange] = (today, book, source)
             log.info("instrument list %s: %d options (%s)", exchange, len(book), source)
         return self._books[exchange][1]
+
+    def _mcx_units(self, book: InstrumentBook) -> InstrumentBook:
+        out = InstrumentBook([])
+        for key, inst in book._by_key.items():
+            units = self.lot_units.get(inst.name)
+            if not units:
+                continue
+            i = replace(inst, lot_size=units)
+            out._by_key[key] = i
+            out._by_symbol[i.tradingsymbol] = i
+        out._futures = {n: f for n, f in book._futures.items() if n in self.lot_units}
+        return out
+
+    def units_per_lot(self, exchange: str, tradingsymbol: str) -> int:
+        """Units in one Kite quantity step: 1 on NFO/BFO (Kite counts units), units per lot on MCX."""
+        if exchange != "MCX":
+            return 1
+        return self.book("MCX").by_symbol(tradingsymbol).lot_size
+
+    def spot_future(self, underlying: str) -> tuple[int, str]:
+        """(instrument_token, tradingsymbol) of the MCX future the nearest option expiry is written on
+        (the first future expiring on/after it: CRUDEOIL Oct options -> Oct future, GOLDM Oct -> Nov)."""
+        u = underlying.upper()
+        today = self.clock().date()
+        futs = [f for f in self.book(exchange_for(u)).futures(u) if f[0] >= today]
+        if not futs:
+            raise KeyError(f"no {u} futures in the instrument list")
+        exps = self.expiries(u)
+        after = [f for f in futs if exps and f[0] >= exps[0]]
+        exp, token, sym = (after or futs)[0]
+        return token, sym
 
     def source(self, exchange: str) -> str | None:
         c = self._books.get(exchange)

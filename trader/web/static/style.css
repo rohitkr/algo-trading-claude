@@ -60,3 +60,5 @@ pre { white-space:pre-wrap; font-size:12px; }
 .subnav { padding:8px 16px; background:var(--card); border-bottom:1px solid var(--line); }
 .subnav a { color:var(--paper); text-decoration:none; font-weight:600; font-size:13px; }
 .subnav a:hover { text-decoration:underline; }
+/* live.js: prices are pushed, so the manual refresh buttons are only shown without a live stream */
+.live-prices #get-ltp { display:none; }
