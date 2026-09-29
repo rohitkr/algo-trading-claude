@@ -564,17 +564,18 @@ function applyTemplate(kind) {
     add({side: "SELL", option_type: "CE", strike: atm + 2 * step});
     add({side: "SELL", option_type: "PE", strike: atm - 2 * step});
   } else if (kind === "iron_condor") {
-    // Buy the wings (hedges) before selling the shorts - both for display and because Trade All places
-    // BUY legs before SELL legs anyway, protecting margin.
+    // Display order BUY-SELL-SELL-BUY (wings on the outside, shorts together in the middle) - this is
+    // cosmetic only. Trade All always places BUY legs before SELL legs regardless of this list's order
+    // (see strategy.py's create_and_trade), so margin safety doesn't depend on this ordering.
     add({side: "BUY", option_type: "PE", strike: atm - 6 * step, leg_role: "LONG_PE_WING"});
     add({side: "SELL", option_type: "PE", strike: atm - 2 * step, leg_role: "SHORT_PE"});
-    add({side: "BUY", option_type: "CE", strike: atm + 6 * step, leg_role: "LONG_CE_WING"});
     add({side: "SELL", option_type: "CE", strike: atm + 2 * step, leg_role: "SHORT_CE"});
+    add({side: "BUY", option_type: "CE", strike: atm + 6 * step, leg_role: "LONG_CE_WING"});
   } else if (kind === "iron_fly") {
     add({side: "BUY", option_type: "PE", strike: atm - 4 * step, leg_role: "LONG_PE_WING"});
     add({side: "SELL", option_type: "PE", strike: atm, leg_role: "SHORT_PE"});
-    add({side: "BUY", option_type: "CE", strike: atm + 4 * step, leg_role: "LONG_CE_WING"});
     add({side: "SELL", option_type: "CE", strike: atm, leg_role: "SHORT_CE"});
+    add({side: "BUY", option_type: "CE", strike: atm + 4 * step, leg_role: "LONG_CE_WING"});
   }
   renderLegs();
   LEGS.forEach(fetchLegPrice);
