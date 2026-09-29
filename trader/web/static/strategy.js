@@ -167,11 +167,18 @@ $("#base-underlying").addEventListener("change", onBaseUnderlying);
 $("#base-expiry").addEventListener("change", onBaseExpiry);
 
 // ---------------------------------------------------------------- legs
+function currentMultiplier() { return Number($("#lot-multiplier").value) || 1; }
+
 function newLeg(overrides) {
   const atm = atmStrike() || 0;
+  // SL/TP are optional by default: the strategy's own combined profit/loss exit can cover a leg instead
+  // (see the global config panel), so a blank per-leg value is a valid, common choice, not an oversight.
+  // base_lots is the leg's OWN lot count at 1x - the multiplier dropdown scales every leg from this base
+  // (Sensibull-style), so it stays correct no matter how many times the multiplier is changed.
+  const baseLots = (overrides && overrides.base_lots) || 1;
   const leg = {id: NEXT_ID++, side: "SELL", underlying: $("#base-underlying").value, expiry: $("#base-expiry").value,
-              strike: atm, option_type: "CE", lots: 1, entry_price: null,
-              sl_value: 20, sl_type: "POINTS", tp_value: null, tp_type: "POINTS", leg_role: "", checked: true};
+              strike: atm, option_type: "CE", base_lots: baseLots, lots: baseLots * currentMultiplier(), entry_price: null,
+              sl_value: null, sl_type: "POINTS", tp_value: null, tp_type: "POINTS", leg_role: "", checked: true};
   return Object.assign(leg, overrides);
 }
 
@@ -189,6 +196,7 @@ async function fetchLegPrice(leg) {
   try {
     const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(leg.underlying)}&expiry=${leg.expiry}&strike=${leg.strike}&option_type=${leg.option_type}`);
     if (c.ltp != null) leg.entry_price = c.ltp;
+    if (c.lot_size != null) leg.lot_size = c.lot_size;      // needed for the payoff chart's rupee scale
   } catch (e) { /* leave price editable, empty */ }
   renderLegs();
 }
@@ -197,6 +205,7 @@ function legRow(leg) {
   const expiries = (META.underlyings[leg.underlying]?.expiries || []).map((e) =>
     `<option value="${e}" ${e === leg.expiry ? "selected" : ""}>${e}</option>`).join("");
   return `<tr data-id="${leg.id}" class="${leg.checked ? "active-leg" : ""}">
+    <td class="drag-handle" title="Drag to reorder">⠿</td>
     <td><input type="checkbox" class="leg-check" data-f="checked" ${leg.checked ? "checked" : ""}></td>
     <td><button type="button" class="bs-btn ${leg.side === "BUY" ? "buy" : "sell"}" data-act="side">${leg.side === "BUY" ? "B" : "S"}</button></td>
     <td><select data-f="expiry">${expiries}</select></td>
@@ -209,14 +218,14 @@ function legRow(leg) {
     <td class="lots-cell"><input type="number" min="1" step="1" data-f="lots" value="${leg.lots}"></td>
     <td class="price-cell"><input type="number" step="0.05" min="0.05" data-f="entry_price" value="${leg.entry_price ?? ""}" placeholder="LTP"></td>
     <td><div class="slp-cell">
-      <input type="number" step="0.05" min="0" data-f="sl_value" value="${leg.sl_value ?? ""}">
+      <input type="number" step="0.05" min="0" data-f="sl_value" value="${leg.sl_value ?? ""}" placeholder="optional">
       <select data-f="sl_type">
         <option value="POINTS" ${leg.sl_type === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${leg.sl_type === "PERCENT" ? "selected" : ""}>SL%</option>
         <option value="PRICE" ${leg.sl_type === "PRICE" ? "selected" : ""}>On price</option>
       </select></div></td>
     <td><div class="slp-cell">
-      <input type="number" step="0.05" min="0" data-f="tp_value" value="${leg.tp_value ?? ""}">
+      <input type="number" step="0.05" min="0" data-f="tp_value" value="${leg.tp_value ?? ""}" placeholder="optional">
       <select data-f="tp_type">
         <option value="POINTS" ${leg.tp_type === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${leg.tp_type === "PERCENT" ? "selected" : ""}>TP%</option>
@@ -228,10 +237,110 @@ function legRow(leg) {
 
 function renderLegs() {
   $("#leg-tbody").innerHTML = LEGS.map(legRow).join("") ||
-    `<tr><td colspan="10" class="hint small">No legs yet - add one or pick a template above.</td></tr>`;
+    `<tr><td colspan="11" class="hint small">No legs yet - add one or pick a template above.</td></tr>`;
   renderSummaries();
   renderCalc();
+  renderPayoff();
   saveStored();          // one choke point: every leg add/remove/edit/template/price-refresh calls this
+}
+
+// ---------------------------------------------------------------- payoff-at-expiry chart
+function legPayoffAtExpiry(spot, leg) {
+  const qty = leg.lots * (leg.lot_size || 1);
+  const premium = leg.entry_price || 0;
+  const intrinsic = leg.option_type === "CE" ? Math.max(spot - leg.strike, 0) : Math.max(leg.strike - spot, 0);
+  const perUnit = leg.side === "BUY" ? (intrinsic - premium) : (premium - intrinsic);
+  return perUnit * qty;
+}
+
+function combinedPayoff(spot, legs) { return legs.reduce((s, l) => s + legPayoffAtExpiry(spot, l), 0); }
+
+// Slope of the combined payoff far to the right (spot -> +inf) / far to the left (spot -> 0): only CE legs
+// matter on the right, only PE legs on the left (the other side's intrinsic value is flat out there). A
+// non-zero slope means that side of the structure is genuinely open-ended, not just "off the chart".
+function tailSlopes(legs) {
+  const unit = (l) => l.lots * (l.lot_size || 1) * (l.side === "BUY" ? 1 : -1);
+  return {
+    right: legs.filter((l) => l.option_type === "CE").reduce((s, l) => s + unit(l), 0),
+    left: legs.filter((l) => l.option_type === "PE").reduce((s, l) => s + unit(l), 0),
+  };
+}
+
+function renderPayoff() {
+  const legs = LEGS.filter((l) => l.checked && l.strike && l.entry_price != null);
+  const box = $("#payoff-chart"), stats = $("#payoff-stats");
+  if (legs.length < LEGS.filter((l) => l.checked).length) {
+    box.innerHTML = `<p class="hint small">Waiting on a price for every leg…</p>`;
+    stats.innerHTML = "";
+    return;
+  }
+  if (!legs.length) { box.innerHTML = `<p class="hint small">Add a leg to see its payoff.</p>`; stats.innerHTML = ""; return; }
+
+  const strikes = legs.map((l) => l.strike);
+  const spread = Math.max(...strikes) - Math.min(...strikes);
+  const pad = Math.max(BASE_STEP * 6, spread * 0.6, 1);
+  const lo = Math.min(...strikes) - pad, hi = Math.max(...strikes) + pad;
+  const xs = new Set([lo, hi]);
+  for (let i = 0; i <= 100; i++) xs.add(lo + ((hi - lo) * i) / 100);
+  strikes.forEach((k) => { xs.add(k - 0.01); xs.add(k); xs.add(k + 0.01); });   // land exactly on the kinks
+  const points = Array.from(xs).sort((a, b) => a - b).map((x) => [x, combinedPayoff(x, legs)]);
+
+  let maxY = Math.max(0, ...points.map((p) => p[1])), minY = Math.min(0, ...points.map((p) => p[1]));
+  if (maxY === minY) { maxY += 1; minY -= 1; }
+  const breakevens = [];
+  for (let i = 1; i < points.length; i++) {
+    const [x0, y0] = points[i - 1], [x1, y1] = points[i];
+    if ((y0 < 0 && y1 >= 0) || (y0 > 0 && y1 <= 0)) breakevens.push(x0 + (x1 - x0) * (0 - y0) / (y1 - y0));
+  }
+
+  const W = 640, H = 240, mL = 54, mR = 14, mT = 14, mB = 26;
+  const pw = W - mL - mR, ph = H - mT - mB;
+  const xScale = (x) => mL + ((x - lo) / (hi - lo)) * pw;
+  const yScale = (y) => mT + ((maxY - y) / (maxY - minY)) * ph;
+  const zeroY = yScale(0);
+
+  const path = `M ${xScale(points[0][0])},${zeroY} ` +
+    points.map(([x, y]) => `L ${xScale(x)},${yScale(y)}`).join(" ") +
+    ` L ${xScale(points[points.length - 1][0])},${zeroY} Z`;
+  const linePath = `M ` + points.map(([x, y]) => `${xScale(x)},${yScale(y)}`).join(" L ");
+  const zeroFrac = ((maxY - 0) / (maxY - minY)) * 100;
+
+  const strikeLines = [...new Set(strikes)].map((k) =>
+    `<line x1="${xScale(k)}" y1="${mT}" x2="${xScale(k)}" y2="${mT + ph}" class="strike-line"/>
+     <text x="${xScale(k)}" y="${H - 8}" class="axis-label" text-anchor="middle">${k}</text>`).join("");
+  const beMarks = breakevens.map((be) =>
+    `<circle cx="${xScale(be)}" cy="${zeroY}" r="3.5" class="be-dot"/>
+     <text x="${xScale(be)}" y="${zeroY - 8}" class="axis-label be-label" text-anchor="middle">${Math.round(be)}</text>`).join("");
+  const curSpotLine = SPOT != null && SPOT >= lo && SPOT <= hi
+    ? `<line x1="${xScale(SPOT)}" y1="${mT}" x2="${xScale(SPOT)}" y2="${mT + ph}" class="spot-line"/>
+       <text x="${xScale(SPOT)}" y="${mT + 10}" class="axis-label spot-label" text-anchor="middle">Spot</text>` : "";
+
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="payoff-svg">
+    <defs><linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--buy)" stop-opacity=".35"/>
+      <stop offset="${zeroFrac}%" stop-color="var(--buy)" stop-opacity=".08"/>
+      <stop offset="${zeroFrac}%" stop-color="var(--sell)" stop-opacity=".08"/>
+      <stop offset="100%" stop-color="var(--sell)" stop-opacity=".35"/>
+    </linearGradient></defs>
+    ${strikeLines}
+    <line x1="${mL}" y1="${zeroY}" x2="${mL + pw}" y2="${zeroY}" class="zero-line"/>
+    <path d="${path}" fill="url(#pnlGrad)" stroke="none"/>
+    <path d="${linePath}" fill="none" class="payoff-line"/>
+    ${curSpotLine}
+    ${beMarks}
+    <text x="${mL - 6}" y="${yScale(maxY) + 4}" class="axis-label" text-anchor="end">${money(Math.round(maxY))}</text>
+    <text x="${mL - 6}" y="${yScale(minY) + 4}" class="axis-label" text-anchor="end">${money(Math.round(minY))}</text>
+  </svg>`;
+
+  const slopes = tailSlopes(legs);
+  const maxProfit = slopes.right > 0 ? "Unlimited" : money(Math.round(maxY));
+  const maxLoss = (slopes.right < 0 || slopes.left < 0) ? "Unlimited" : money(Math.round(minY));
+  const beText = breakevens.length ? breakevens.map((b) => Math.round(b)).join(" / ") : "none in range";
+  const netPremium = legs.reduce((s, l) => s + (l.entry_price || 0) * l.lots * (l.lot_size || 1) * (l.side === "SELL" ? 1 : -1), 0);
+  stats.innerHTML = `<div>Max profit <output class="pos">${maxProfit}</output></div>
+    <div>Max loss <output class="neg">${maxLoss}</output></div>
+    <div>Breakeven <output>${beText}</output></div>
+    <div>Net premium <output class="${netPremium >= 0 ? "pos" : "neg"}">${money(Math.round(netPremium))} ${netPremium >= 0 ? "credit" : "debit"}</output></div>`;
 }
 
 function renderSummaries() {
@@ -239,7 +348,7 @@ function renderSummaries() {
     const qty = l.lots;
     return `<div class="leg-summary"><b class="${l.side}">${l.side}</b> ${esc(l.option_type)} • ${esc(l.underlying)}
       • Strike ${l.strike}${l.strike === atmStrike() ? " (ATM)" : ""} • Lots ${qty}
-      • SL ${l.sl_value ?? "–"}${l.sl_type === "PERCENT" ? "%" : l.sl_type === "PRICE" ? " (price)" : "pts"}
+      • SL ${l.sl_value ?? "auto (wide)"}${l.sl_value != null ? (l.sl_type === "PERCENT" ? "%" : l.sl_type === "PRICE" ? " (price)" : "pts") : ""}
       • TP ${l.tp_value ?? "off"}${l.tp_value != null ? (l.tp_type === "PERCENT" ? "%" : l.tp_type === "PRICE" ? " (price)" : "pts") : ""}</div>`;
   }).join("");
 }
@@ -282,7 +391,13 @@ $("#leg-tbody").addEventListener("change", (ev) => {
   const f = ev.target.dataset.f;
   if (!leg || !f) return;
   if (f === "checked") leg.checked = ev.target.checked;
-  else if (["strike", "lots", "entry_price", "sl_value", "tp_value"].includes(f)) leg[f] = ev.target.value === "" ? null : Number(ev.target.value);
+  else if (f === "lots") {
+    const v = ev.target.value === "" ? null : Number(ev.target.value);
+    leg.lots = v;
+    // A manual per-leg edit becomes that leg's new 1x baseline, so a later multiplier change scales from
+    // what the user just typed rather than silently overwriting it.
+    if (v != null) leg.base_lots = Math.max(1, Math.round(v / currentMultiplier()));
+  } else if (["strike", "entry_price", "sl_value", "tp_value"].includes(f)) leg[f] = ev.target.value === "" ? null : Number(ev.target.value);
   else leg[f] = ev.target.value;
   const refetch = f === "strike" || f === "expiry";
   renderLegs();
@@ -290,6 +405,72 @@ $("#leg-tbody").addEventListener("change", (ev) => {
 });
 
 $("#add-leg").onclick = () => addLeg();
+$("#lot-multiplier").addEventListener("change", () => {
+  const m = currentMultiplier();
+  LEGS.forEach((l) => { l.lots = (l.base_lots || 1) * m; });   // each leg's own Lots cell stays editable after
+  renderLegs();
+});
+
+// ---------------------------------------------------------------- drag to reorder
+// The <tr> is draggable ONLY while the mouse is down on its ⠿ handle (armed on handle mousedown, disarmed
+// on mouseup/dragend) - marking the whole row draggable all the time swallows ordinary clicks on the
+// buttons/inputs inside it (a real mouse/trackpad click always has a little drift, which a permanently
+// draggable row can misread as a drag start instead of a click).
+let DRAG_ID = null;
+$("#leg-tbody").addEventListener("mousedown", (ev) => {
+  if (!ev.target.closest(".drag-handle")) return;
+  const row = ev.target.closest("tr[data-id]");
+  if (row) row.draggable = true;
+});
+function disarmDrag() {
+  $$("#leg-tbody tr[data-id]").forEach((r) => { r.draggable = false; });
+}
+$("#leg-tbody").addEventListener("mouseup", disarmDrag);
+$("#leg-tbody").addEventListener("dragstart", (ev) => {
+  const row = ev.target.closest("tr[data-id]");
+  if (!row) return;
+  DRAG_ID = Number(row.dataset.id);
+  ev.dataTransfer.effectAllowed = "move";
+  ev.dataTransfer.setData("text/plain", String(DRAG_ID));   // Firefox requires data to be set to drag at all
+  row.classList.add("dragging");
+});
+$("#leg-tbody").addEventListener("dragend", (ev) => {
+  const row = ev.target.closest("tr[data-id]");
+  if (row) row.classList.remove("dragging");
+  disarmDrag();
+  clearDropMarks();
+});
+function clearDropMarks() { $$("#leg-tbody tr").forEach((r) => r.classList.remove("drop-above", "drop-below")); }
+$("#leg-tbody").addEventListener("dragover", (ev) => {
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "move";
+  const row = ev.target.closest("tr[data-id]");
+  clearDropMarks();
+  if (!row || DRAG_ID == null || Number(row.dataset.id) === DRAG_ID) return;
+  const above = ev.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
+  row.classList.add(above ? "drop-above" : "drop-below");
+});
+$("#leg-tbody").addEventListener("dragleave", (ev) => {
+  if (!ev.target.closest("#leg-tbody")?.contains(ev.relatedTarget)) clearDropMarks();
+});
+$("#leg-tbody").addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  clearDropMarks();
+  const row = ev.target.closest("tr[data-id]");
+  if (!row || DRAG_ID == null) return;
+  const overId = Number(row.dataset.id);
+  if (overId === DRAG_ID) return;
+  const above = ev.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
+  const from = LEGS.findIndex((l) => l.id === DRAG_ID);
+  const overIndex = LEGS.findIndex((l) => l.id === overId);
+  if (from === -1 || overIndex === -1) return;
+  let insertAt = above ? overIndex : overIndex + 1;
+  const [moved] = LEGS.splice(from, 1);        // removing `from` shifts every later index left by one
+  if (from < insertAt) insertAt -= 1;
+  LEGS.splice(insertAt, 0, moved);
+  DRAG_ID = null;
+  renderLegs();
+});
 
 // ---------------------------------------------------------------- templates
 function applyTemplate(kind) {
@@ -306,15 +487,17 @@ function applyTemplate(kind) {
     add({side: "SELL", option_type: "CE", strike: atm + 2 * step});
     add({side: "SELL", option_type: "PE", strike: atm - 2 * step});
   } else if (kind === "iron_condor") {
-    add({side: "SELL", option_type: "CE", strike: atm + 2 * step, leg_role: "SHORT_CE"});
-    add({side: "BUY", option_type: "CE", strike: atm + 6 * step, leg_role: "LONG_CE_WING"});
-    add({side: "SELL", option_type: "PE", strike: atm - 2 * step, leg_role: "SHORT_PE"});
+    // Buy the wings (hedges) before selling the shorts - both for display and because Trade All places
+    // BUY legs before SELL legs anyway, protecting margin.
     add({side: "BUY", option_type: "PE", strike: atm - 6 * step, leg_role: "LONG_PE_WING"});
+    add({side: "SELL", option_type: "PE", strike: atm - 2 * step, leg_role: "SHORT_PE"});
+    add({side: "BUY", option_type: "CE", strike: atm + 6 * step, leg_role: "LONG_CE_WING"});
+    add({side: "SELL", option_type: "CE", strike: atm + 2 * step, leg_role: "SHORT_CE"});
   } else if (kind === "iron_fly") {
-    add({side: "SELL", option_type: "CE", strike: atm, leg_role: "SHORT_CE"});
+    add({side: "BUY", option_type: "PE", strike: atm - 4 * step, leg_role: "LONG_PE_WING"});
     add({side: "SELL", option_type: "PE", strike: atm, leg_role: "SHORT_PE"});
     add({side: "BUY", option_type: "CE", strike: atm + 4 * step, leg_role: "LONG_CE_WING"});
-    add({side: "BUY", option_type: "PE", strike: atm - 4 * step, leg_role: "LONG_PE_WING"});
+    add({side: "SELL", option_type: "CE", strike: atm, leg_role: "SHORT_CE"});
   }
   renderLegs();
   LEGS.forEach(fetchLegPrice);
@@ -391,11 +574,14 @@ function strategyCard(s) {
   const cfg = s.config;
   const legRows = s.legs.map((t) => {
     const canExit = LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
+    const canEdit = LEG_LIVE_STATUSES.has(t.status) && !t.pending_exit_reason;
     return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${t.quantity}</td>
     <td>${num(t.entry_avg_price ?? t.entry_price)}</td><td>${num(t.kite_ltp ?? t.last_ltp)}</td>
+    <td>${num(t.current_sl)}</td><td>${num(t.target)}</td>
     <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}">${money(t.pnl)}</td>
     <td>${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
-    <td>${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}</td></tr>`;
+    <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
+      ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}</td></tr>`;
   }).join("");
   const cls = s.combined_pnl >= 0 ? "pos" : "neg";
   return `<div class="strategy-card">
@@ -406,8 +592,32 @@ function strategyCard(s) {
       <span class="pnl ${cls}">${money(s.combined_pnl)}</span>
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
-    <table><tr><th>Side</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>LTP</th><th>P&amp;L</th><th>Status</th><th></th></tr>${legRows}</table>
+    <div class="leg-table-scroll">
+    <table><tr><th>Side</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>LTP</th><th>SL</th><th>TP</th><th>P&amp;L</th><th>Status</th><th></th></tr>${legRows}</table>
+    </div>
   </div>`;
+}
+
+async function editLeg(tid) {
+  try {
+    const t = (await api(`/api/trades/${tid}`)).trade;
+    const html = `<div id="leg-edit-form" class="edit-leg-grid">
+      <label>Stop-loss ₹ <input name="stop_loss" type="number" step="0.05" value="${t.current_sl ?? ""}"></label>
+      <label>Target ₹ (blank = none) <input name="target" type="number" step="0.05" value="${t.target ?? ""}"></label>
+    </div>`;
+    const go = await dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html);
+    if (!go) return;
+    const changes = {};
+    $$("#leg-edit-form input[name]").forEach((el) => { changes[el.name] = el.value; });
+    const p = await api(`/api/trades/${tid}/edit/prepare`, {changes});
+    if (!p.ok) return alertBox("Edit not allowed", p.errors || []);
+    if (!Object.keys(p.diff).length) return;   // nothing actually changed
+    const rows = Object.entries(p.diff).map(([k, [a, b]]) => `<tr><td>${esc(k)}</td><td>${esc(a ?? "–")}</td><td>→ <b>${esc(b ?? "–")}</b></td></tr>`).join("");
+    const ok = await dialog("Apply this change?", `<table>${rows}</table>`, MODE === "LIVE");
+    if (!ok) return;
+    await api(`/api/trades/${tid}/edit/apply`, {token: p.token});
+    refreshStrategies();
+  } catch (e) { alertBox("Edit failed", [e.message]); }
 }
 
 async function exitLeg(tid) {
@@ -443,6 +653,8 @@ $("#strategies-list").addEventListener("click", (ev) => {
   if (id) return exitStrategy(Number(id));
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
+  const eid = ev.target.dataset.legEdit;
+  if (eid) return editLeg(Number(eid));
 });
 
 // ---------------------------------------------------------------- init

@@ -30,6 +30,11 @@ main { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,2.2fr); gap:
 @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
 .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; min-width: 0; }
 .panel.wide { grid-column: span 1; }
+/* #strategies-panel only: grid auto-placement was dropping it into the NARROW left column (row 2, since
+   config-panel + legs-panel already fill row 1's two tracks) - it needs the full row's width explicitly,
+   which .panel.wide's plain "span 1" never gave it. legs-panel is left exactly as it was: it already lands
+   in the wide right-hand track through ordinary auto-placement. */
+#strategies-panel { grid-column: 1 / -1; }
 h2 { margin: 0 0 12px; font-size: 15px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 
@@ -86,6 +91,18 @@ table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }
 .leg-table .stepper { width: 22px; height: 26px; padding: 0; border-radius: 4px; background: var(--card2); border: 1px solid var(--line); color: var(--fg); cursor: pointer; }
 .leg-table .strike-cell input { width: 72px; }
 .leg-table .lots-cell input { width: 48px; }
+/* The strike/+- and lots fields have their own controls, so the browser's native up/down spinner is
+   redundant clutter - hide it on hover for just these two number inputs. */
+.leg-table .strike-cell input::-webkit-inner-spin-button, .leg-table .strike-cell input::-webkit-outer-spin-button,
+.leg-table .lots-cell input::-webkit-inner-spin-button, .leg-table .lots-cell input::-webkit-outer-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
+.leg-table .strike-cell input, .leg-table .lots-cell input { -moz-appearance: textfield; }
+.drag-handle { cursor: grab; color: var(--muted); text-align: center; width: 18px; user-select: none; }
+.drag-handle:active { cursor: grabbing; }
+.leg-table tr.dragging { opacity: .4; }
+.leg-table tr.drop-above { box-shadow: inset 0 2px 0 0 var(--accent); }
+.leg-table tr.drop-below { box-shadow: inset 0 -2px 0 0 var(--accent); }
 .leg-table .price-cell input { width: 66px; }
 .leg-table .slp-cell { display: flex; gap: 3px; }
 .leg-table .slp-cell input { width: 52px; } .leg-table .slp-cell select { width: 78px; }
@@ -104,6 +121,22 @@ table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }
 
 .calc-row { margin: 10px 0; font-size: 12px; color: var(--muted); }
 .calc-row output { display: block; margin-top: 2px; font-size: 15px; }
+.pos { color: var(--buy); } .neg { color: var(--sell); }
+
+.payoff-block { margin: 14px 0; padding-top: 12px; border-top: 1px dashed var(--line); }
+.payoff-block h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+#payoff-chart { border: 1px solid var(--line); border-radius: 8px; background: var(--card2); padding: 4px; }
+.payoff-svg { width: 100%; height: auto; display: block; }
+.zero-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.strike-line { stroke: var(--line); stroke-width: 1; }
+.payoff-line { stroke: var(--accent); stroke-width: 2; }
+.spot-line { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 4 2; }
+.axis-label { fill: var(--muted); font-size: 9px; }
+.spot-label { fill: var(--warn); font-weight: 700; }
+.be-dot { fill: var(--fg); }
+.be-label { fill: var(--fg); font-weight: 700; }
+.payoff-stats { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.payoff-stats output { display: block; margin-top: 2px; font-size: 15px; font-weight: 700; }
 
 .action-row { display: flex; gap: 10px; margin-top: 14px; }
 button { font: inherit; padding: 9px 16px; border-radius: 6px; border: 1px solid var(--line); background: var(--card2); color: var(--fg); cursor: pointer; }
@@ -112,13 +145,18 @@ button.primary { background: var(--accent); color: #fff; border-color: var(--acc
 button.ghost { background: transparent; }
 button.danger { background: var(--sell); color: #fff; border-color: var(--sell); }
 
-#strategies-list { display: flex; flex-direction: column; gap: 10px; }
-.strategy-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--card2); }
+#strategies-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.strategy-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--card2); min-width: 0; }
 .strategy-card .head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .strategy-card .head .name { font-weight: 700; }
 .strategy-card .pnl.pos { color: var(--buy); } .strategy-card .pnl.neg { color: var(--sell); }
-.strategy-card table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.strategy-card .leg-table-scroll { overflow-x: auto; margin-top: 8px; }
+.strategy-card table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .strategy-card th, .strategy-card td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.leg-actions { display: flex; gap: 4px; }
+.edit-btn { background: var(--buy-blue); color: #fff; border-color: var(--buy-blue); font-weight: 600; }
+.edit-btn:hover { filter: brightness(1.1); }
+.edit-leg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .status-pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.2); }
 .status-pill.ACTIVE { background: var(--accent); color: #fff; }
 .status-pill.DONE { background: var(--buy); color: #fff; }

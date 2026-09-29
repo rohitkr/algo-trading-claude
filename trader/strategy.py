@@ -128,6 +128,9 @@ class StrategyService:
                 return {"ok": False, "errors": ["at least one leg is required"]}
             if len(legs_in) > 12:
                 return {"ok": False, "errors": ["too many legs (12 max)"]}
+            # BUY legs go in before SELL legs (margin: a short's margin requirement drops once its hedge is
+            # already on) - the order the user arranged them in the UI is kept within each side.
+            legs_in = sorted(legs_in, key=lambda l: 0 if str(l.get("side") or "").upper() == "BUY" else 1)
 
             auto_exit = cfg.square_off_time.strftime("%H:%M") if cfg.square_off_time else None
             previews = []
@@ -172,11 +175,21 @@ class StrategyService:
         inst = self.svc.instruments.resolve(str(leg.get("underlying") or "").upper(),
                                             date.fromisoformat(str(leg.get("expiry"))),
                                             float(leg["strike"]), str(leg.get("option_type") or "").upper())
+        qty = (leg.get("lots") or 1) * inst.lot_size
         stop_loss = _resolve_price(entry_price, side, "sl", _num(leg.get("sl_value")), str(leg.get("sl_type") or "POINTS").upper())
         target = _resolve_price(entry_price, side, "tp", _num(leg.get("tp_value")), str(leg.get("tp_type") or "POINTS").upper())
         if stop_loss is None:
-            raise ValueError("stop-loss is required")
+            # No per-leg stop was given: the strategy's own combined profit/loss exit covers this leg
+            # instead. The engine still needs SOME numeric stop_loss (every trade has one), so one is set
+            # here wide enough that it is very unlikely to be the thing that actually exits the leg - capped
+            # at 95% of TRADER_MAX_LOSS_PER_TRADE so a leg with no chosen stop still can't exceed the
+            # account's own configured per-trade loss limit.
+            wide_points = (self.svc.cfg.max_loss_per_trade * 0.95) / qty
+            stop_loss = entry_price - wide_points if side == "BUY" else entry_price + wide_points
         stop_loss = round_to_tick(stop_loss, inst.tick_size, "SELL" if side == "BUY" else "BUY")
+        if side == "BUY" and stop_loss <= 0:
+            raise ValueError("no stop-loss given and the account's max-loss-per-trade limit is too small "
+                             "for this quantity to derive a safe wide one - set a stop-loss for this leg")
         if target is not None:
             target = round_to_tick(target, inst.tick_size, "BUY" if side == "BUY" else "SELL")
         return dict(underlying=inst.name, expiry=inst.expiry.isoformat(), strike=inst.strike,

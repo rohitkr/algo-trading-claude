@@ -173,3 +173,37 @@ def test_profit_trailing_lock_and_trail(tmp_path):
     for tid in res["confirmed"]:
         t = r.trade(tid)
         assert (t["status"], t["exit_reason"]) == (L.EXITED, "STRATEGY_TRAIL_STOP")
+
+
+def test_leg_without_sl_gets_a_wide_auto_stop(tmp_path):
+    r = Rig(tmp_path, max_loss_per_trade=10000)
+    r.quotes.set(CE, 100)
+    strat = _strategy(r)
+    payload = {"config": {"order_type": "MIS"},
+              "legs": [dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
+                            side="BUY", lots=1, entry_price=100)]}       # no sl_value at all
+    res = strat.create_and_trade(payload)
+    assert res["ok"], res
+    t = r.trade(res["confirmed"][0])
+    # BUY: stop below entry, and the account's own risk check already bounds it to <= max_loss_per_trade
+    assert t["initial_sl"] < 100
+    assert abs(100 - t["initial_sl"]) * t["quantity"] <= 10000 + 1e-6
+
+
+def test_buy_legs_placed_before_sell_legs(tmp_path):
+    r = Rig(tmp_path)
+    r.quotes.set(CE, 100)
+    r.quotes.set(PE, 90)
+    strat = _strategy(r)
+    # order in the payload is SELL-then-BUY; the engine must still place BUY first
+    legs = [
+        dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE", side="SELL",
+             lots=1, entry_price=100, sl_value=20, sl_type="POINTS"),
+        dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="PE", side="BUY",
+             lots=1, entry_price=90, sl_value=20, sl_type="POINTS"),
+    ]
+    res = strat.create_and_trade({"config": {"order_type": "MIS"}, "legs": legs})
+    assert res["ok"], res
+    order_ids = res["confirmed"]
+    first, second = r.trade(order_ids[0]), r.trade(order_ids[1])
+    assert first["side"] == "BUY" and second["side"] == "SELL"
