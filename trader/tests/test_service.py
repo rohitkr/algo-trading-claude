@@ -546,3 +546,98 @@ def test_kite_refusal_reason_is_shown(tmp_path):
     r.tick(11)
     t = r.trade(tid)
     assert t["status"] == L.REJECTED and "simulated network error" in t["error"] and "never reached" in t["error"]
+
+
+def test_manual_partial_exit_books_qty_and_resizes_sl(tmp_path):
+    r = Rig(tmp_path)
+    tid = _active(r, lots=3)                          # 195 qty total
+    p = r.svc.prepare_partial_exit(tid, 65)            # book 1 of 3 lots
+    assert p["ok"] if "ok" in p else True
+    assert p["qty"] == 65 and p["open_qty"] == 195
+    res = r.svc.confirm_partial_exit(tid, p["token"])
+    assert res["ok"]
+    t = r.trade(tid)
+    assert t["status"] == L.POSITION_ACTIVE            # remainder stays open and managed
+    assert t["pending_partial_qty"] is None             # cleared once the order was placed
+    part = r.repo.orders(tid, "PARTIAL")[0]
+    assert (part["quantity"], part["status"], part["purpose"]) == (65, "COMPLETE", "USER_PARTIAL_EXIT")
+    t2 = r.trade(tid)
+    assert (t2["open_qty"], t2["exited_qty"]) == (130, 65)
+    sl = [o for o in r.repo.orders(tid, "SL") if is_working_status(o)]
+    assert sl and sl[0]["quantity"] == 130              # SL resized to protect only what remains
+
+
+def is_working_status(o):
+    return o["status"] not in ("COMPLETE", "CANCELLED", "REJECTED", "CANCELLED AMO", "EXPIRED", "NOT_PLACED")
+
+
+def test_prepare_partial_exit_rejects_bad_qty(tmp_path):
+    r = Rig(tmp_path)
+    tid = _active(r, lots=3)
+    with pytest.raises(ActionError, match="multiple of the lot size"):
+        r.svc.prepare_partial_exit(tid, 40)             # not a multiple of 65
+    with pytest.raises(ActionError, match="less than the open quantity"):
+        r.svc.prepare_partial_exit(tid, 195)             # the whole position - must use Exit instead
+    with pytest.raises(ActionError, match="less than the open quantity"):
+        r.svc.prepare_partial_exit(tid, 260)             # more than the whole position
+
+
+def test_manual_partial_exit_blocked_once_a_full_exit_has_started(tmp_path):
+    r = Rig(tmp_path, reconcile_confirmations=1)
+    tid = _active(r, lots=3)
+    r.svc.request_exit(tid, r.svc.prepare(tid, "EXIT")["token"])   # PAPER auto-fills: this may finish immediately
+    with pytest.raises(ActionError):                              # "already in progress" or "nothing to exit"
+        r.svc.prepare_partial_exit(tid, 65)
+
+
+def test_manual_partial_exit_then_remaining_position_still_stops_out(tmp_path):
+    r = Rig(tmp_path)
+    tid = _active(r, lots=3, stop_loss=90)
+    p = r.svc.prepare_partial_exit(tid, 65)
+    r.svc.confirm_partial_exit(tid, p["token"])
+    assert (r.trade(tid)["open_qty"], r.trade(tid)["status"]) == (130, L.POSITION_ACTIVE)
+    r.price(89)                                          # breach the stop on the remaining 130
+    r.tick()
+    t = r.trade(tid)
+    assert (t["status"], t["exit_reason"], t["open_qty"]) == (L.EXITED, L.STOP_LOSS_HIT, 0)
+    assert t["exited_qty"] == 195                        # 65 booked manually + 130 stopped out = the whole position
+
+
+def test_refresh_ltp_updates_last_ltp_and_unrealized_pnl(tmp_path):
+    r = Rig(tmp_path)
+    tid = _active(r)                    # entry_price=100, side BUY
+    assert r.trade(tid)["last_ltp"] == 100    # set once by the entry fill tick
+    r.quotes.set(SYM, 111)              # a new price the regular tick hasn't seen yet (no r.tick() call)
+    res = r.svc.refresh_ltp(tid)
+    assert res["last_ltp"] == 111
+    assert res["unrealized_pnl"] == pytest.approx(11 * 65)
+
+
+def test_refresh_ltp_rejects_closed_trade(tmp_path):
+    r = Rig(tmp_path)
+    tid = r.open_trade()
+    r.svc.cancel_entry(tid, r.svc.prepare(tid, "CANCEL")["token"])
+    assert r.trade(tid)["status"] == L.CANCELLED
+    with pytest.raises(ActionError):
+        r.svc.refresh_ltp(tid)
+
+
+def test_pending_unfilled_entry_still_shows_a_live_ltp(tmp_path):
+    r = Rig(tmp_path)
+    r.price(90)                          # BUY limit 100 stays working: LTP 90 <= entry, wait - BUY fills when LTP<=limit
+    tid = r.open_trade(entry_price=80, stop_loss=70, target=100)   # limit 80, LTP 90: BUY stays unfilled (90 > 80)
+    r.tick()
+    t = r.trade(tid)
+    assert t["status"] == L.ENTRY_PENDING and t["filled_qty"] == 0
+    assert t["last_ltp"] == 90           # shown even though nothing has filled
+    assert t["unrealized_pnl"] in (None, 0)   # no P&L yet - nothing to compute it from
+
+
+def test_refresh_ltp_works_on_a_pending_unfilled_trade(tmp_path):
+    r = Rig(tmp_path)
+    r.price(90)
+    tid = r.open_trade(entry_price=80, stop_loss=70, target=100)
+    assert r.trade(tid)["status"] == L.ENTRY_PENDING
+    r.price(95)
+    res = r.svc.refresh_ltp(tid)
+    assert res["last_ltp"] == 95

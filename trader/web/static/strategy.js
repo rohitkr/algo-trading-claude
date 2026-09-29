@@ -129,15 +129,17 @@ async function onBaseUnderlying() {
   saveStored();
 }
 
-async function refreshSpot() {
+async function refreshSpot(force) {
   SPOT = null; $("#base-spot").textContent = "–";
   try {
-    const s = await api(`/api/spot?ltp=1&underlying=${encodeURIComponent($("#base-underlying").value)}`);
+    const s = await api(`/api/spot?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent($("#base-underlying").value)}`);
     SPOT = s.spot; $("#base-spot").textContent = s.spot == null ? "no price" : money(s.spot);
   } catch (e) { /* leave as no price */ }
 }
-$("#refresh-spot").onclick = async () => { await refreshSpot(); renderLegs(); };
-$("#refresh-prices").onclick = () => LEGS.forEach(fetchLegPrice);
+// An explicit button click always gets a real Breeze call (force=1, bypasses the quote-interval cache) -
+// the passive auto-fetch on selection keeps the normal cache so browsing strikes doesn't burn the budget.
+$("#refresh-spot").onclick = async () => { await refreshSpot(true); renderLegs(); };
+$("#refresh-prices").onclick = () => LEGS.forEach((l) => fetchLegPrice(l, true));
 
 async function onBaseExpiry(resetStrikes) {
   const u = $("#base-underlying").value, e = $("#base-expiry").value;
@@ -191,10 +193,10 @@ function addLeg(overrides) {
 
 function removeLeg(id) { LEGS = LEGS.filter((l) => l.id !== id); renderLegs(); }
 
-async function fetchLegPrice(leg) {
+async function fetchLegPrice(leg, force) {
   if (!leg.expiry || !leg.strike) return;
   try {
-    const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(leg.underlying)}&expiry=${leg.expiry}&strike=${leg.strike}&option_type=${leg.option_type}`);
+    const c = await api(`/api/contract?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent(leg.underlying)}&expiry=${leg.expiry}&strike=${leg.strike}&option_type=${leg.option_type}`);
     if (c.ltp != null) leg.entry_price = c.ltp;
     if (c.lot_size != null) leg.lot_size = c.lot_size;      // needed for the payoff chart's rupee scale
   } catch (e) { /* leave price editable, empty */ }
@@ -245,6 +247,9 @@ function renderLegs() {
 }
 
 // ---------------------------------------------------------------- payoff-at-expiry chart
+// The curve/Max profit/Max loss below are the classic "if held to expiry" payoff - intrinsic value only,
+// the same as any options payoff diagram, deliberately ignoring SL/TP (see renderPayoff()'s separate
+// "if SL/TP hit" figure for that).
 function legPayoffAtExpiry(spot, leg) {
   const qty = leg.lots * (leg.lot_size || 1);
   const premium = leg.entry_price || 0;
@@ -264,6 +269,34 @@ function tailSlopes(legs) {
     right: legs.filter((l) => l.option_type === "CE").reduce((s, l) => s + unit(l), 0),
     left: legs.filter((l) => l.option_type === "PE").reduce((s, l) => s + unit(l), 0),
   };
+}
+
+// The SL/TP actually configured on each leg, resolved from points/percent/price to an absolute option
+// price exactly the way the backend does it (strategy.py's _resolve_price) - used only for the separate
+// "if SL/TP hit" rupee figure, never for the expiry curve above.
+function legSlTpPrices(leg) {
+  const entry = leg.entry_price;
+  if (entry == null) return {slPrice: null, tpPrice: null};
+  const buy = leg.side === "BUY";
+  const resolve = (kind, value, typ) => {
+    if (value == null) return null;
+    if (typ === "PRICE") return value;
+    const up = kind === "tp" ? buy : !buy;          // BUY: TP above entry, SL below. SELL: the reverse.
+    const delta = typ === "PERCENT" ? (entry * value) / 100 : value;
+    return up ? entry + delta : entry - delta;
+  };
+  return {slPrice: resolve("sl", leg.sl_value, leg.sl_type), tpPrice: resolve("tp", leg.tp_value, leg.tp_type)};
+}
+
+// Rupee P&L for one leg if ITS OWN configured SL (or TP) actually triggers - null when that leg has no
+// SL (or no TP) set, so the caller can tell "zero" apart from "not configured".
+function legSlTpPnl(leg) {
+  const qty = leg.lots * (leg.lot_size || 1);
+  const buy = leg.side === "BUY";
+  const {slPrice, tpPrice} = legSlTpPrices(leg);
+  const slPnl = slPrice != null ? (buy ? (slPrice - leg.entry_price) : (leg.entry_price - slPrice)) * qty : null;
+  const tpPnl = tpPrice != null ? (buy ? (tpPrice - leg.entry_price) : (leg.entry_price - tpPrice)) * qty : null;
+  return {slPnl, tpPnl};
 }
 
 function renderPayoff() {
@@ -337,10 +370,22 @@ function renderPayoff() {
   const maxLoss = (slopes.right < 0 || slopes.left < 0) ? "Unlimited" : money(Math.round(minY));
   const beText = breakevens.length ? breakevens.map((b) => Math.round(b)).join(" / ") : "none in range";
   const netPremium = legs.reduce((s, l) => s + (l.entry_price || 0) * l.lots * (l.lot_size || 1) * (l.side === "SELL" ? 1 : -1), 0);
-  stats.innerHTML = `<div>Max profit <output class="pos">${maxProfit}</output></div>
-    <div>Max loss <output class="neg">${maxLoss}</output></div>
+  stats.innerHTML = `<div>Max profit (at expiry) <output class="pos">${maxProfit}</output></div>
+    <div>Max loss (at expiry) <output class="neg">${maxLoss}</output></div>
     <div>Breakeven <output>${beText}</output></div>
     <div>Net premium <output class="${netPremium >= 0 ? "pos" : "neg"}">${money(Math.round(netPremium))} ${netPremium >= 0 ? "credit" : "debit"}</output></div>`;
+
+  // Separate from the expiry curve above: what you'd actually realise if every leg's OWN configured SL /
+  // TP triggers (this is how positions actually close in this app - almost never held to expiry).
+  const slTp = legs.map((l) => ({leg: l, ...legSlTpPnl(l)}));
+  const withSL = slTp.filter((r) => r.slPnl != null), withTP = slTp.filter((r) => r.tpPnl != null);
+  const slSum = withSL.reduce((s, r) => s + r.slPnl, 0), tpSum = withTP.reduce((s, r) => s + r.tpPnl, 0);
+  const slNote = withSL.length < legs.length ? ` <small>(${legs.length - withSL.length} leg(s) with no SL not counted)</small>` : "";
+  const tpNote = withTP.length < legs.length ? ` <small>(${legs.length - withTP.length} leg(s) with no TP not counted)</small>` : "";
+  $("#payoff-sltp").innerHTML = (withSL.length || withTP.length) ? `
+    <div>If SL hit <output class="neg">${withSL.length ? money(Math.round(slSum)) : "–"}</output>${slNote}</div>
+    <div>If TP hit <output class="pos">${withTP.length ? money(Math.round(tpSum)) : "–"}</output>${tpNote}</div>` :
+    `<p class="hint small">No leg has an SL or TP set - nothing to show here (per-leg SL/TP is optional).</p>`;
 }
 
 function renderSummaries() {
@@ -561,11 +606,38 @@ $("#trade-all").onclick = async () => {
 $("#save-draft").onclick = () => alertBox("Drafts", ["Saving drafts for later/recurring runs is planned for a later phase; Trade All places the strategy now."]);
 
 // ---------------------------------------------------------------- active strategies
+// Exiting less than the full open quantity of a leg goes through the partial-exit API (prepare+confirm);
+// exiting all of it uses the normal full exit - same distinction exitLeg() below makes for a single leg.
+async function exitQty(t, qty) {
+  if (qty >= t.open_qty) {
+    const p = await api(`/api/trades/${t.id}/prepare`, {action: "EXIT"});
+    return api(`/api/trades/${t.id}/exit`, {token: p.token});
+  }
+  const p = await api(`/api/trades/${t.id}/partial/prepare`, {qty});
+  return api(`/api/trades/${t.id}/partial/confirm`, {token: p.token});
+}
+
 async function exitStrategy(id) {
-  const ok = await dialog("Exit this strategy?", "<p>Every open leg will be exited at a marketable price.</p>", MODE === "LIVE");
-  if (!ok) return;
-  try { await api(`/api/strategies/${id}/exit`, {}); refreshStrategies(); }
-  catch (e) { alertBox("Error", [e.message]); }
+  try {
+    const s = (await api(`/api/strategies/${id}`)).strategy;
+    const openLegs = s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason);
+    if (!openLegs.length) return alertBox("Nothing to exit", ["no open legs on this strategy"]);
+    const rows = openLegs.map((t) => {
+      const lots = Math.floor(t.open_qty / t.lot_size);
+      return `<tr><td>${esc(t.side)} ${esc(t.tradingsymbol)}</td><td>${lots} lot(s) open</td>
+        <td><input type="number" min="1" max="${lots}" step="1" value="${lots}" data-tid="${t.id}" class="exit-qty-input"></td></tr>`;
+    }).join("");
+    const ok = await dialog("Exit this strategy?",
+      `<p class="hint small">Lots to exit per leg - defaults to the full open amount, edit any row to exit less.</p>
+       <table><tr><th>Leg</th><th>Open</th><th>Lots to exit</th></tr>${rows}</table>`, MODE === "LIVE");
+    if (!ok) return;
+    for (const el of $$(".exit-qty-input")) {
+      const leg = openLegs.find((t) => t.id === Number(el.dataset.tid));
+      const lots = Math.max(0, Math.min(Math.floor(leg.open_qty / leg.lot_size), Math.floor(Number(el.value)) || 0));
+      if (lots > 0) await exitQty(leg, lots * leg.lot_size);
+    }
+    refreshStrategies();
+  } catch (e) { alertBox("Error", [e.message]); }
 }
 
 const LEG_LIVE_STATUSES = new Set(["ENTRY_ORDER_PLACED", "ENTRY_PENDING", "ENTRY_EXECUTED", "POSITION_ACTIVE"]);
@@ -575,8 +647,10 @@ function strategyCard(s) {
   const legRows = s.legs.map((t) => {
     const canExit = LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
     const canEdit = LEG_LIVE_STATUSES.has(t.status) && !t.pending_exit_reason;
-    return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${t.quantity}</td>
-    <td>${num(t.entry_avg_price ?? t.entry_price)}</td><td>${num(t.kite_ltp ?? t.last_ltp)}</td>
+    const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
+    return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${qtyText}</td>
+    <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
+    <td>${num(t.kite_ltp ?? t.last_ltp)}</td>
     <td>${num(t.current_sl)}</td><td>${num(t.target)}</td>
     <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}">${money(t.pnl)}</td>
     <td>${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
@@ -593,7 +667,9 @@ function strategyCard(s) {
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
     <div class="leg-table-scroll">
-    <table><tr><th>Side</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>LTP</th><th>SL</th><th>TP</th><th>P&amp;L</th><th>Status</th><th></th></tr>${legRows}</table>
+    <table><tr><th>Side</th><th>Symbol</th><th>Qty</th><th>Entry</th>
+      <th>LTP <button type="button" class="ltp-refresh" data-strategy-ltp="${s.id}" title="Refresh every leg's LTP now">↻</button></th>
+      <th>SL</th><th>TP</th><th>P&amp;L</th><th>Status</th><th></th></tr>${legRows}</table>
     </div>
   </div>`;
 }
@@ -601,7 +677,13 @@ function strategyCard(s) {
 async function editLeg(tid) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
+    // Before the entry order has filled, entry price (and lots) are still changeable, same as the
+    // single-trade page's edit form - only once it starts filling does the limit price stop making sense.
+    const entryOpen = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status);
+    const f = (name, label, val, attrs = 'type="number" step="0.05"') =>
+      `<label>${label} <input name="${name}" ${attrs} value="${val ?? ""}"></label>`;
     const html = `<div id="leg-edit-form" class="edit-leg-grid">
+      ${entryOpen ? f("entry_price", "Entry limit ₹", t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
       <label>Stop-loss ₹ <input name="stop_loss" type="number" step="0.05" value="${t.current_sl ?? ""}"></label>
       <label>Target ₹ (blank = none) <input name="target" type="number" step="0.05" value="${t.target ?? ""}"></label>
     </div>`;
@@ -622,13 +704,14 @@ async function editLeg(tid) {
 
 async function exitLeg(tid) {
   try {
-    const p = await api(`/api/trades/${tid}/prepare`, {action: "EXIT"});
-    const t = p.trade;
-    const ok = await dialog("Exit this leg?",
-      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div><p>Exit ${t.open_qty} at a marketable price.</p>`,
-      MODE === "LIVE");
+    const t = (await api(`/api/trades/${tid}`)).trade;
+    const lots = Math.floor(t.open_qty / t.lot_size);
+    const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
+      <label>Lots to exit (of ${lots} open) <input id="exit-lots" type="number" min="1" max="${lots}" step="1" value="${lots}"></label>`;
+    const ok = await dialog("Exit this leg?", html, MODE === "LIVE");
     if (!ok) return;
-    await api(`/api/trades/${tid}/exit`, {token: p.token});
+    const chosen = Math.max(1, Math.min(lots, Math.floor(Number($("#exit-lots").value)) || lots));
+    await exitQty(t, chosen * t.lot_size);
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
 }
@@ -648,13 +731,27 @@ async function refreshStrategies() {
     $("#strategies-list").innerHTML = sd.strategies.map(strategyCard).join("") || `<p class="hint small">No strategies yet.</p>`;
   } catch (e) { /* keep the last render */ }
 }
-$("#strategies-list").addEventListener("click", (ev) => {
+// Manual LTP refresh: no click-count limit of our own (max_age=0 on every call) - Breeze's own daily
+// budget is the only real ceiling, same as the "Get LTP" / "↻ Spot" buttons elsewhere in the app. One
+// button on the column heading refreshes every leg in that strategy at once (no per-row button).
+async function refreshLegLtp(tid) {
+  try { await api(`/api/trades/${tid}/refresh_ltp`, {}); }
+  catch (e) { alertBox("Error", [e.message]); }
+}
+
+$("#strategies-list").addEventListener("click", async (ev) => {
   const id = ev.target.dataset.exit;
   if (id) return exitStrategy(Number(id));
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
   const eid = ev.target.dataset.legEdit;
   if (eid) return editLeg(Number(eid));
+  const sid = ev.target.dataset.strategyLtp;
+  if (sid) {
+    const s = (await api(`/api/strategies/${sid}`)).strategy;
+    await Promise.all(s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status)).map((t) => refreshLegLtp(t.id)));
+    return refreshStrategies();
+  }
 });
 
 // ---------------------------------------------------------------- init

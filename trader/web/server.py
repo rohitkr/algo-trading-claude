@@ -79,9 +79,9 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                     return self._json(200, {"strikes": strikes})
                 if u.path == "/api/contract":
                     return self._json(200, svc.contract(q["underlying"], q["expiry"], float(q["strike"]), q["option_type"],
-                                                           with_ltp=q.get("ltp") == "1"))
+                                                           with_ltp=q.get("ltp") == "1", force=q.get("force") == "1"))
                 if u.path == "/api/spot":
-                    return self._json(200, svc.spot(q["underlying"], with_ltp=q.get("ltp") == "1"))
+                    return self._json(200, svc.spot(q["underlying"], with_ltp=q.get("ltp") == "1", force=q.get("force") == "1"))
                 if u.path == "/api/strategies":
                     with svc.lock:
                         return self._json(200, {"strategies": app.strategies.dashboard()})
@@ -135,6 +135,15 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                     if m.group(2) == "prepare":
                         return self._json(200, svc.prepare_edit(tid, dict(body.get("changes") or {})))
                     return self._json(200, svc.apply_edit(tid, str(body.get("token", ""))))
+                m = re.fullmatch(r"/api/trades/(\d+)/partial/(prepare|confirm)", u.path)
+                if m:
+                    tid = int(m.group(1))
+                    if m.group(2) == "prepare":
+                        return self._json(200, svc.prepare_partial_exit(tid, body.get("qty")))
+                    return self._json(200, svc.confirm_partial_exit(tid, str(body.get("token", ""))))
+                m = re.fullmatch(r"/api/trades/(\d+)/refresh_ltp", u.path)
+                if m:
+                    return self._json(200, svc.refresh_ltp(int(m.group(1))))
                 m = re.fullmatch(r"/api/trades/(\d+)/(confirm|prepare|cancel|exit)", u.path)
                 if m:
                     tid, action = int(m.group(1)), m.group(2)

@@ -78,6 +78,8 @@ output { font-weight: 700; }
 #refresh-spot { background: var(--card); }
 .base-select { margin-bottom: 12px; }
 .leg-table th button { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 0 0 4px; }
+.ltp-refresh { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 0 0 2px; }
+.ltp-refresh:hover { color: var(--fg); }
 
 .leg-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }
@@ -137,6 +139,11 @@ table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }
 .be-label { fill: var(--fg); font-weight: 700; }
 .payoff-stats { margin-top: 10px; font-size: 12px; color: var(--muted); }
 .payoff-stats output { display: block; margin-top: 2px; font-size: 15px; font-weight: 700; }
+.payoff-sltp { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card2); display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap: 10px;
+  font-size: 12px; color: var(--muted); }
+.payoff-sltp output { display: block; margin-top: 2px; font-size: 15px; font-weight: 700; }
+.payoff-sltp small { color: var(--muted); font-weight: 400; }
 
 .action-row { display: flex; gap: 10px; margin-top: 14px; }
 button { font: inherit; padding: 9px 16px; border-radius: 6px; border: 1px solid var(--line); background: var(--card2); color: var(--fg); cursor: pointer; }

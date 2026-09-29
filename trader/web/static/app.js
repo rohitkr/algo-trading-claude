@@ -72,19 +72,19 @@ async function onUnderlying() {
   await onExpiry();
 }
 
-async function refreshSpot() {
+async function refreshSpot(force) {
   try {
-    const s = await api(`/api/spot?ltp=1&underlying=${encodeURIComponent($("#underlying").value)}`);
+    const s = await api(`/api/spot?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent($("#underlying").value)}`);
     SPOT = s.spot;
     $("#price-value").textContent = s.spot == null ? "no price" : money(s.spot);
   } catch (e) { SPOT = null; $("#price-value").textContent = "–"; }
 }
 
-async function refreshOptionLtp() {
+async function refreshOptionLtp(force) {
   const d = formData();
   if (!d.expiry || !d.strike) return;
   try {
-    const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
+    const c = await api(`/api/contract?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
     $("#opt-ltp").textContent = c.ltp == null ? "no price" : money(c.ltp);
   } catch (e) { $("#opt-ltp").textContent = "–"; }
 }
@@ -150,7 +150,7 @@ function check() {
   $("#pnl-gain").textContent = gain == null ? "–" : money(gain);
 }
 
-$("#get-ltp").onclick = () => { refreshSpot(); refreshOptionLtp(); };   // manual refresh (auto-fetch also runs on selection)
+$("#get-ltp").onclick = () => { refreshSpot(true); refreshOptionLtp(true); };   // force=1: a click always gets a fresh Breeze call
 
 form.addEventListener("input", (ev) => {
   saveStored();
@@ -216,16 +216,38 @@ function toast(msg) { $("#form-hint").textContent = msg; }
 
 async function action(tid, act) {
   try {
+    if (act === "EXIT") return await exitPosition(tid);
     const p = await api(`/api/trades/${tid}/prepare`, {action: act});
     const t = p.trade;
-    const what = act === "EXIT" ? `Exit ${t.open_qty} of ${t.tradingsymbol} at market-limit` : `Cancel the unfilled entry order of ${t.tradingsymbol}`;
-    const ok = await dialog(act === "EXIT" ? "Exit position?" : "Cancel entry order?",
-      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div><p>${esc(what)}.</p>` +
-      `<p>Filled ${t.filled_qty}/${t.quantity}, open ${t.open_qty}, P&amp;L ${money(t.pnl)}</p>`, MODE === "LIVE");
+    const ok = await dialog("Cancel entry order?",
+      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
+       <p>Cancel the unfilled entry order of ${esc(t.tradingsymbol)}.</p>`, MODE === "LIVE");
     if (!ok) return;
-    await api(`/api/trades/${tid}/${act === "EXIT" ? "exit" : "cancel"}`, {token: p.token});
+    await api(`/api/trades/${tid}/cancel`, {token: p.token});
     refresh();
   } catch (e) { alertBox("Error", [e.message]); }
+}
+
+// Exiting less than the full open quantity goes through the partial-exit API (prepare+confirm); exiting
+// all of it uses the normal full exit. The qty field defaults to the full open amount but is editable down.
+async function exitPosition(tid) {
+  const t = (await api(`/api/trades/${tid}`)).trade;
+  const lots = Math.floor(t.open_qty / t.lot_size);
+  const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
+    <p>Filled ${t.filled_qty}/${t.quantity}, open ${t.open_qty}, P&amp;L ${money(t.pnl)}</p>
+    <label>Lots to exit (of ${lots} open) <input id="exit-lots" type="number" min="1" max="${lots}" step="1" value="${lots}"></label>`;
+  const ok = await dialog("Exit position?", html, MODE === "LIVE");
+  if (!ok) return;
+  const chosen = Math.max(1, Math.min(lots, Math.floor(Number($("#exit-lots").value)) || lots));
+  const qty = chosen * t.lot_size;
+  if (qty >= t.open_qty) {
+    const p = await api(`/api/trades/${tid}/prepare`, {action: "EXIT"});
+    await api(`/api/trades/${tid}/exit`, {token: p.token});
+  } else {
+    const p = await api(`/api/trades/${tid}/partial/prepare`, {qty});
+    await api(`/api/trades/${tid}/partial/confirm`, {token: p.token});
+  }
+  refresh();
 }
 
 // ---------------------------------------------------------------- edit

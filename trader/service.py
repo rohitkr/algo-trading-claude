@@ -266,6 +266,49 @@ class TradeService:
             self._tick_locked()           # fresh broker snapshot, position verified, then the exit
             return {"ok": True, "trade": self.trade_view(trade_id)}
 
+    def prepare_partial_exit(self, trade_id: int, qty: int) -> dict:
+        """Token + summary for a user-requested partial exit of `qty` units (a whole number of lots,
+        1 <= qty < the open quantity - the rest stays open and managed as before). Nothing is placed until
+        confirm_partial_exit(token)."""
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] not in L.LIVE_STATUSES:
+                raise ActionError(f"trade is {t['status']}; nothing to exit")
+            if t["pending_exit_reason"]:
+                raise ActionError(f"an exit is already in progress ({t['pending_exit_reason']})")
+            if t["pending_partial_qty"]:
+                raise ActionError("a partial exit is already queued for this trade")
+            q = self._derive(t)
+            if q["uncertain"]:
+                raise ActionError("an order of this trade is still being confirmed with Zerodha; retry shortly")
+            open_qty, lot = q["open"], t["lot_size"]
+            if open_qty <= 0:
+                raise ActionError("nothing open on this trade to exit")
+            qty = int(qty) if qty else 0
+            if qty <= 0 or qty % lot != 0:
+                raise ActionError(f"quantity must be a positive multiple of the lot size ({lot})")
+            if qty >= open_qty:
+                raise ActionError(f"quantity must be less than the open quantity ({open_qty}); use Exit for all of it")
+            token = self.repo.issue_token(trade_id, "PARTIAL_EXIT",
+                                          self.clock() + timedelta(seconds=self.cfg.confirm_token_s), payload={"qty": qty})
+            return {"token": token, "qty": qty, "open_qty": open_qty, "trade": self.trade_view(trade_id)}
+
+    def confirm_partial_exit(self, trade_id: int, token: str) -> dict:
+        with self.lock:
+            t = self._get(trade_id)
+            tok = self.repo.consume_token(token, trade_id, "PARTIAL_EXIT")
+            if not tok:
+                raise ActionError("confirmation token is invalid, used or expired: review the partial exit again")
+            if t["status"] not in L.LIVE_STATUSES:
+                raise ActionError(f"trade is {t['status']}; nothing to exit")
+            if t["pending_exit_reason"]:
+                raise ActionError(f"an exit is already in progress ({t['pending_exit_reason']})")
+            qty = int(tok["payload"]["qty"])
+            self.repo.update_trade(trade_id, pending_partial_qty=qty)
+            self.audit(trade_id, "PARTIAL_EXIT_REQUESTED", "INFO", {"qty": qty})
+            self._tick_locked()           # fresh broker snapshot, position verified, then the partial exit
+            return {"ok": True, "trade": self.trade_view(trade_id)}
+
     # -- edits ----------------------------------------------------------------------------------------
     EDITABLE = ("entry_price", "lots", "stop_loss", "target", "trail_enabled", "trail_type", "trail_value",
                 "trail_step", "partial_enabled", "partial_lots", "partial_price", "auto_exit_time")
@@ -595,9 +638,17 @@ class TradeService:
                 self._transition(t, L.CANCELLED, "ENTRY_CANCELLED", "INFO",
                                  {"by": "user" if entry["cancel_requested"] else "broker/outside",
                                   "message": entry["status_message"]})
-            elif self._time_exit_reason(t, now) and is_working(entry["status"]) and not entry["cancel_requested"]:
-                self.placer.cancel(entry, f"{self._time_exit_reason(t, now)} before the entry filled")
-                self._resync = True
+            else:
+                reason = self._time_exit_reason(t, now)
+                if reason and is_working(entry["status"]) and not entry["cancel_requested"]:
+                    self.placer.cancel(entry, f"{reason} before the entry filled")
+                    self._resync = True
+                elif is_working(entry["status"]):
+                    # Still resting, unfilled: show a live market price anyway (slow cadence - there's no
+                    # position to protect yet) so the user can judge whether their limit entry is realistic.
+                    inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+                    ltp = self._ltp_safe(inst, max_age=self.cfg.quote_slow_s)
+                    self._mark(t, q, ltp, now)
             return
         if is_terminal(entry["status"]) and t["status"] in (L.ENTRY_ORDER_PLACED, L.ENTRY_PENDING):
             self._transition(t, L.ENTRY_EXECUTED, "ENTRY_COMPLETE", "INFO",
@@ -666,6 +717,8 @@ class TradeService:
                 self._trail(t, ltp)
             if t["partial_enabled"] and not t["partial_done"]:
                 self._partial(t, q, ltp, now)
+        if t["pending_partial_qty"]:
+            self._manual_partial(t, q, ltp, now)
         self._reprice_working(t, q, ltp, now, kinds=("PARTIAL",))
         self._ensure_sl(t, q, ltp, now)
 
@@ -928,6 +981,35 @@ class TradeService:
         q["orders"] = self.repo.orders(t["id"])
         self._resync = True
 
+    def _manual_partial(self, t: dict, q: dict, ltp, now: datetime) -> None:
+        """A user-requested partial exit (confirm_partial_exit), placed the next tick after a fresh broker
+        snapshot - never synchronously in the request handler. Same PARTIAL order kind and shrink-the-SL-
+        first sequencing as the automatic partial_price booking above; unlike that one, this can be repeated
+        (each request is independent, not a one-shot flag) as long as the previous PARTIAL order has
+        resolved and there is still enough open quantity left."""
+        pq = t["pending_partial_qty"]
+        if any(o["kind"] == "PARTIAL" and is_working(o["status"]) for o in q["orders"]):
+            return                          # wait for the last PARTIAL order (manual or automatic) to resolve
+        if pq >= q["open"]:
+            self.repo.update_trade(t["id"], pending_partial_qty=None)
+            self.audit(t["id"], "PARTIAL_EXIT_SKIPPED", "WARNING",
+                      {"requested": pq, "open_qty": q["open"], "detail": "requested >= open quantity; use Exit"})
+            return
+        sl = next((o for o in q["orders"] if o["kind"] == "SL" and is_working(o["status"])), None)
+        if sl is not None:
+            if sl["status"] in LOCAL_PENDING or sl["cancel_requested"]:
+                return
+            if not self.placer.modify(sl, quantity=sl["filled_qty"] + q["open"] - pq):
+                return
+        price = self._marketable(t, ltp, L.exit_side(t["side"]))
+        if price is None:
+            return                          # no Breeze price yet; retried next tick, pending_partial_qty stays set
+        self.audit(t["id"], "PARTIAL_EXIT_TRIGGERED", "INFO", {"ltp": ltp, "qty": pq, "reason": "user requested"})
+        row = self.placer.place(t, "PARTIAL", L.exit_side(t["side"]), pq, "LIMIT", price, purpose="USER_PARTIAL_EXIT")
+        if row is not None:
+            self.repo.update_trade(t["id"], pending_partial_qty=None)
+            self._resync = True
+
     def _reprice_working(self, t: dict, q: dict, ltp, now: datetime, kinds: tuple) -> None:
         for o in q["orders"]:
             if o["kind"] not in kinds or not is_working(o["status"]) or not o["broker_order_id"] or o["cancel_requested"]:
@@ -947,12 +1029,13 @@ class TradeService:
 
     # -- helpers -----------------------------------------------------------------------------------------
     def _mark(self, t: dict, q: dict, ltp, now: datetime) -> None:
-        if ltp is None or q["entry_avg"] is None:
+        if ltp is None:
             return
-        unreal = round(L.direction(t["side"]) * q["open"] * (ltp - q["entry_avg"]), 2)
-        self.repo.update_trade(t["id"], last_ltp=ltp, last_ltp_at=now.isoformat(timespec="seconds"),
-                               unrealized_pnl=unreal)
-        t.update(last_ltp=ltp, unrealized_pnl=unreal)
+        upd = {"last_ltp": ltp, "last_ltp_at": now.isoformat(timespec="seconds")}
+        if q["entry_avg"] is not None:      # nothing has filled yet: still show the market price, just no P&L
+            upd["unrealized_pnl"] = round(L.direction(t["side"]) * q["open"] * (ltp - q["entry_avg"]), 2)
+        self.repo.update_trade(t["id"], **upd)
+        t.update(upd)
 
     def _mark_kite_ltp(self, t: dict, snap: Snapshot) -> None:
         """Kite's own last_price for this position (free, from positions()), display-only for the
@@ -1066,6 +1149,23 @@ class TradeService:
                 "auto_exit_at": t["auto_exit_at"], "square_off_time": self.cfg.square_off_time.strftime("%H:%M")
                 if self.cfg.square_off_time else None, "ltp": ltp, "mode": self.cfg.mode}
 
+    def refresh_ltp(self, trade_id: int) -> dict:
+        """On-demand LTP refresh for one open trade (e.g. the Active Strategies table's own refresh button) -
+        always bypasses the quote-interval cache (max_age=0, same as contract()/spot()'s force=True), with
+        no click-count limit of our own; Breeze's own daily budget is the only real ceiling, same as any
+        other explicit "get me a price now" action in this app. Display only (last_ltp/unrealized_pnl) -
+        SL/target/trailing decisions still run on the monitor's own regular tick, never on this."""
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] not in L.OPEN_STATUSES:
+                raise ActionError(f"trade is {t['status']}; nothing to refresh")
+            inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+            ltp = self._ltp_safe(inst, max_age=0)
+            if ltp is not None:
+                q = self._derive(t)
+                self._mark(t, q, ltp, self.clock())
+            return self.trade_view(trade_id)
+
     def trade_view(self, trade_id: int) -> dict:
         t = self.repo.trade(trade_id)
         return self._view(t)
@@ -1120,22 +1220,27 @@ class TradeService:
                     out[u] = {"exchange": exchange_for(u), "error": str(exc)}
             return {"underlyings": out, "mode": self.cfg.mode, "default_product": self.cfg.product}
 
-    def spot(self, underlying: str, with_ltp: bool = False) -> dict:
+    def spot(self, underlying: str, with_ltp: bool = False, force: bool = False) -> dict:
         """The underlying index's own LTP (display only, e.g. the "NIFTY 22810" banner) - a Breeze call only
-        when asked, same as contract()'s "Get LTP". Never used for any trading decision."""
+        when asked, same as contract()'s "Get LTP". Never used for any trading decision.
+        force=True (an explicit refresh click) bypasses the quote_ttl_s cache with max_age=0, so a click
+        right after another one still gets a real Breeze call instead of silently returning the same
+        cached price - see market.py's BreezeQuotes.ltp() for what max_age=0 does."""
         with self.lock:
             px = None
             if with_ltp and hasattr(self.quotes, "spot"):
                 try:
-                    px = self.quotes.spot(underlying, max_age=self.cfg.quote_ttl_s)
+                    px = self.quotes.spot(underlying, max_age=0 if force else self.cfg.quote_ttl_s)
                 except Exception as exc:
                     self.repo.set_status_value("last_error", f"spot {underlying}: {exc}")
             return {"underlying": underlying, "spot": px}
 
-    def contract(self, underlying: str, expiry: str, strike: float, option_type: str, with_ltp: bool = False) -> dict:
-        """Contract details; the Breeze price only when asked (the form's "Get LTP" button), not on every change."""
+    def contract(self, underlying: str, expiry: str, strike: float, option_type: str, with_ltp: bool = False,
+                force: bool = False) -> dict:
+        """Contract details; the Breeze price only when asked (the form's "Get LTP" button), not on every
+        change. force=True: see spot()'s docstring - an explicit refresh always gets a fresh Breeze call."""
         with self.lock:
             inst = self.instruments.resolve(underlying, date.fromisoformat(expiry), strike, option_type)
             return {"tradingsymbol": inst.tradingsymbol, "exchange": inst.exchange, "lot_size": inst.lot_size,
                     "tick_size": inst.tick_size,
-                    "ltp": self._ltp_safe(inst, max_age=self.cfg.quote_ttl_s) if with_ltp else None}
+                    "ltp": self._ltp_safe(inst, max_age=0 if force else self.cfg.quote_ttl_s) if with_ltp else None}
