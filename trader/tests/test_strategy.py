@@ -207,3 +207,39 @@ def test_buy_legs_placed_before_sell_legs(tmp_path):
     order_ids = res["confirmed"]
     first, second = r.trade(order_ids[0]), r.trade(order_ids[1])
     assert first["side"] == "BUY" and second["side"] == "SELL"
+
+
+def test_past_square_off_time_is_dropped_not_blocking(tmp_path):
+    from datetime import datetime
+
+    from .fakes import Clock
+    # 14:55 is still within the rig's own default trading window (trading_end 15:00, square_off 15:15) -
+    # only the STRATEGY's own configured square-off (14:50) has passed, which is what's under test here.
+    clock = Clock(datetime(2026, 9, 28, 14, 55))
+    r = Rig(tmp_path, clock=clock)
+    r.quotes.set(CE, 100)
+    strat = _strategy(r)
+    payload = {"config": {"order_type": "MIS", "square_off_time": "14:50"},   # already in the past
+              "legs": [dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
+                            side="BUY", lots=1, entry_price=100, sl_value=20, sl_type="POINTS")]}
+    res = strat.create_and_trade(payload)
+    assert res["ok"], res                             # must NOT be blocked by the stale square-off time
+    t = r.trade(res["confirmed"][0])
+    assert t["auto_exit_at"] is None                  # dropped, not applied retroactively
+
+
+def test_future_square_off_time_still_applies(tmp_path):
+    from datetime import datetime
+
+    from .fakes import Clock
+    clock = Clock(datetime(2026, 9, 28, 10, 0))       # well before the configured square-off
+    r = Rig(tmp_path, clock=clock)
+    r.quotes.set(CE, 100)
+    strat = _strategy(r)
+    payload = {"config": {"order_type": "MIS", "square_off_time": "15:10"},
+              "legs": [dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
+                            side="BUY", lots=1, entry_price=100, sl_value=20, sl_type="POINTS")]}
+    res = strat.create_and_trade(payload)
+    assert res["ok"], res
+    t = r.trade(res["confirmed"][0])
+    assert t["auto_exit_at"] is not None and t["auto_exit_at"].endswith("15:10:00")

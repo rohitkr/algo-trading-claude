@@ -647,6 +647,9 @@ function strategyCard(s) {
   const legRows = s.legs.map((t) => {
     const canExit = LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
     const canEdit = LEG_LIVE_STATUSES.has(t.status) && !t.pending_exit_reason;
+    // Not yet executed at all (still resting, nothing filled): offer Cancel instead of Exit - there's no
+    // position to exit, just an order to pull before it fills.
+    const canCancel = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status) && t.filled_qty === 0;
     const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${qtyText}</td>
     <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
@@ -655,6 +658,7 @@ function strategyCard(s) {
     <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}">${money(t.pnl)}</td>
     <td>${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
+      ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}</td></tr>`;
   }).join("");
   const cls = s.combined_pnl >= 0 ? "pos" : "neg";
@@ -674,6 +678,23 @@ function strategyCard(s) {
   </div>`;
 }
 
+// Points/percent/price <-> absolute price, for one side (kind: "sl" or "tp") - the same convention the
+// leg-creation table and legSlTpPrices() use: BUY target above entry & stop below, SELL the reverse.
+function slTpValueToPrice(entry, side, kind, value, typ) {
+  if (value == null || value === "" || entry == null) return null;
+  if (typ === "PRICE") return Number(value);
+  const buy = side === "BUY";
+  const up = kind === "tp" ? buy : !buy;
+  const delta = typ === "PERCENT" ? (entry * Number(value)) / 100 : Number(value);
+  return up ? entry + delta : entry - delta;
+}
+function priceToPoints(entry, side, kind, price) {
+  if (price == null || entry == null) return "";
+  const buy = side === "BUY";
+  const up = kind === "tp" ? buy : !buy;
+  return Math.round((up ? price - entry : entry - price) * 100) / 100;
+}
+
 async function editLeg(tid) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
@@ -682,15 +703,33 @@ async function editLeg(tid) {
     const entryOpen = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status);
     const f = (name, label, val, attrs = 'type="number" step="0.05"') =>
       `<label>${label} <input name="${name}" ${attrs} value="${val ?? ""}"></label>`;
+    // Points/%/Price, same as when the leg was created, default Points - shown pre-converted from the
+    // current absolute SL/target so the dialog opens already reflecting today's values.
+    const ref = t.entry_avg_price ?? t.entry_price;
+    const typeOpts = (kind, sel) => `
+        <option value="POINTS" ${sel === "POINTS" ? "selected" : ""}>Points</option>
+        <option value="PERCENT" ${sel === "PERCENT" ? "selected" : ""}>${kind === "sl" ? "SL%" : "TP%"}</option>
+        <option value="PRICE" ${sel === "PRICE" ? "selected" : ""}>On price</option>`;
     const html = `<div id="leg-edit-form" class="edit-leg-grid">
       ${entryOpen ? f("entry_price", "Entry limit ₹", t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
-      <label>Stop-loss ₹ <input name="stop_loss" type="number" step="0.05" value="${t.current_sl ?? ""}"></label>
-      <label>Target ₹ (blank = none) <input name="target" type="number" step="0.05" value="${t.target ?? ""}"></label>
+      <label>Stop-loss <span class="slp-cell">
+        <input id="edit-sl-value" type="number" step="0.05" value="${priceToPoints(ref, t.side, "sl", t.current_sl)}">
+        <select id="edit-sl-type">${typeOpts("sl", "POINTS")}</select>
+      </span></label>
+      <label>Target (blank = none) <span class="slp-cell">
+        <input id="edit-tp-value" type="number" step="0.05" value="${t.target != null ? priceToPoints(ref, t.side, "tp", t.target) : ""}">
+        <select id="edit-tp-type">${typeOpts("tp", "POINTS")}</select>
+      </span></label>
     </div>`;
     const go = await dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html);
     if (!go) return;
     const changes = {};
     $$("#leg-edit-form input[name]").forEach((el) => { changes[el.name] = el.value; });
+    const slVal = $("#edit-sl-value").value, tpVal = $("#edit-tp-value").value;
+    const slPrice = slTpValueToPrice(ref, t.side, "sl", slVal, $("#edit-sl-type").value);
+    const tpPrice = tpVal === "" ? null : slTpValueToPrice(ref, t.side, "tp", tpVal, $("#edit-tp-type").value);
+    if (slPrice != null) changes.stop_loss = slPrice;
+    changes.target = tpPrice ?? "";
     const p = await api(`/api/trades/${tid}/edit/prepare`, {changes});
     if (!p.ok) return alertBox("Edit not allowed", p.errors || []);
     if (!Object.keys(p.diff).length) return;   // nothing actually changed
@@ -712,6 +751,19 @@ async function exitLeg(tid) {
     if (!ok) return;
     const chosen = Math.max(1, Math.min(lots, Math.floor(Number($("#exit-lots").value)) || lots));
     await exitQty(t, chosen * t.lot_size);
+    refreshStrategies();
+  } catch (e) { alertBox("Error", [e.message]); }
+}
+
+async function cancelLeg(tid) {
+  try {
+    const p = await api(`/api/trades/${tid}/prepare`, {action: "CANCEL"});
+    const t = p.trade;
+    const ok = await dialog("Cancel this leg?",
+      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
+       <p>Cancel the unfilled entry order - nothing has been executed on this leg yet.</p>`, MODE === "LIVE");
+    if (!ok) return;
+    await api(`/api/trades/${tid}/cancel`, {token: p.token});
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
 }
@@ -744,6 +796,8 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (id) return exitStrategy(Number(id));
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
+  const cid = ev.target.dataset.legCancel;
+  if (cid) return cancelLeg(Number(cid));
   const eid = ev.target.dataset.legEdit;
   if (eid) return editLeg(Number(eid));
   const sid = ev.target.dataset.strategyLtp;

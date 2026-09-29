@@ -132,7 +132,12 @@ class StrategyService:
             # already on) - the order the user arranged them in the UI is kept within each side.
             legs_in = sorted(legs_in, key=lambda l: 0 if str(l.get("side") or "").upper() == "BUY" else 1)
 
-            auto_exit = cfg.square_off_time.strftime("%H:%M") if cfg.square_off_time else None
+            # A square-off time already in the past (e.g. yesterday's/an earlier session's saved default,
+            # still sitting in the UI when you place a new trade later in the day) can't protect anything
+            # retroactively - so it's dropped instead of blocking every new leg's own creation-time check
+            # (validate()'s "auto-exit time has already passed"), same as leaving it blank.
+            auto_exit = (cfg.square_off_time.strftime("%H:%M")
+                        if cfg.square_off_time and cfg.square_off_time > now.time() else None)
             previews = []
             for i, leg in enumerate(legs_in, 1):
                 try:
