@@ -122,6 +122,11 @@ class BreezeQuotes:
         return self._quote(f"SPOT:{underlying.upper()}", lambda: self._spot_request(underlying), max_age)
 
     def _quote(self, key: str, build_request, max_age: float | None) -> float | None:
+        # Bookkeeping (cache/budget/pacing) is shared state and stays under the lock, but the Breeze network
+        # call itself does NOT - it used to run inside this lock, which meant every symbol's fetch (e.g. 4
+        # legs' worth of "refresh all" clicks) queued up behind one another for the full round-trip each,
+        # turning a ~1-2s Breeze call into an 8s wait for 4 legs. Different symbols' calls now overlap; the
+        # lock only ever guards the in-memory dict/counter updates, which are effectively instant.
         with self._lock:
             now_m = self.monotonic()
             self._watched[key] = now_m
@@ -133,19 +138,22 @@ class BreezeQuotes:
                 return hit[0]
             if pace == float("inf") and hit:
                 return hit[0]
-            try:
-                req = build_request()
-                self.calls += 1
-                q = self.client().get_quote(req)
-                px = float(q["ltp"]) if q and q.get("ltp") not in (None, "") else None
-                if not px or px <= 0:
+            self.calls += 1
+        try:
+            req = build_request()
+            q = self.client().get_quote(req)
+            px = float(q["ltp"]) if q and q.get("ltp") not in (None, "") else None
+            if not px or px <= 0:
+                with self._lock:
                     self.calls += 1
-                    px = self._last_bar_close(req)
-            except Exception as exc:
+                px = self._last_bar_close(req)
+        except Exception as exc:
+            with self._lock:
                 self.errors += 1
                 self.last_error = f"{key}: {type(exc).__name__}: {exc}"
-                log.warning("Breeze price error %s", self.last_error)
-                return hit[0] if hit else None     # the stale cached price, if any (caller sees last_ltp_at)
+            log.warning("Breeze price error %s", self.last_error)
+            return hit[0] if hit else None     # the stale cached price, if any (caller sees last_ltp_at)
+        with self._lock:
             if px and px > 0:
                 self._cache[key] = (px, now_m)
                 self.last_ok = self.clock()

@@ -1154,16 +1154,40 @@ class TradeService:
         always bypasses the quote-interval cache (max_age=0, same as contract()/spot()'s force=True), with
         no click-count limit of our own; Breeze's own daily budget is the only real ceiling, same as any
         other explicit "get me a price now" action in this app. Display only (last_ltp/unrealized_pnl) -
-        SL/target/trailing decisions still run on the monitor's own regular tick, never on this."""
+        SL/target/trailing decisions still run on the monitor's own regular tick, never on this.
+
+        Also re-fetches the broker's own snapshot to update kite_ltp: the table displays
+        `kite_ltp ?? last_ltp`, so if kite_ltp is set (even to a value gone stale because the regular
+        tick's own snapshot call is failing/timing out), refreshing only last_ltp would be invisible -
+        the click has to move whichever field the table is actually showing.
+
+        The two network calls (Breeze quote, broker snapshot) run WITHOUT self.lock held: refreshing
+        several legs at once fires one of these per leg concurrently, and holding the lock across a slow
+        network round-trip would queue them up behind each other one at a time (4 legs x ~2s each = ~8s
+        for what should overlap). Only the trade-state read/write is done under the lock, and briefly -
+        re-checking the trade's status after the network calls in case it closed while we were fetching."""
         with self.lock:
             t = self._get(trade_id)
             if t["status"] not in L.OPEN_STATUSES:
                 raise ActionError(f"trade is {t['status']}; nothing to refresh")
             inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
-            ltp = self._ltp_safe(inst, max_age=0)
-            if ltp is not None:
-                q = self._derive(t)
-                self._mark(t, q, ltp, self.clock())
+        ltp = self._ltp_safe(inst, max_age=0)
+        try:
+            snap = self.broker.snapshot(self.clock())
+        except Exception as exc:
+            snap, snap_exc = None, exc
+        else:
+            snap_exc = None
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] in L.OPEN_STATUSES:
+                if ltp is not None:
+                    q = self._derive(t)
+                    self._mark(t, q, ltp, self.clock())
+                if snap_exc is not None:
+                    self._broker_error("snapshot", snap_exc)
+                elif snap is not None:
+                    self._mark_kite_ltp(t, snap)
             return self.trade_view(trade_id)
 
     def trade_view(self, trade_id: int) -> dict:
@@ -1205,42 +1229,50 @@ class TradeService:
                     "trades_today": self.repo.confirmed_on(self.clock().date())}
 
     def meta(self) -> dict:
-        with self.lock:
-            out = {}
-            for u in self.cfg.underlyings:
-                try:
-                    exps = self.instruments.expiries(u)
-                    lot = None
-                    if exps:
-                        strikes = self.instruments.strikes(u, exps[0])
-                        if strikes:
-                            lot = self.instruments.resolve(u, exps[0], strikes[len(strikes) // 2], "CE").lot_size
-                    out[u] = {"exchange": exchange_for(u), "expiries": [e.isoformat() for e in exps], "lot_size": lot}
-                except Exception as exc:
-                    out[u] = {"exchange": exchange_for(u), "error": str(exc)}
-            return {"underlyings": out, "mode": self.cfg.mode, "default_product": self.cfg.product}
+        """Every configured underlying's expiries/lot size, for the page's dropdowns on load. Deliberately
+        NOT under self.lock: the first call of the day for an exchange not yet cached (e.g. BFO, if nothing
+        has touched SENSEX yet) loads and parses that exchange's whole instrument dump - measurably slow,
+        and holding the service-wide lock for it would stall the live monitor tick (SL/target checks on
+        real open positions) for however long that load takes. instruments/self.cfg are read-only here."""
+        out = {}
+        for u in self.cfg.underlyings:
+            try:
+                exps = self.instruments.expiries(u)
+                lot = None
+                if exps:
+                    strikes = self.instruments.strikes(u, exps[0])
+                    if strikes:
+                        lot = self.instruments.resolve(u, exps[0], strikes[len(strikes) // 2], "CE").lot_size
+                out[u] = {"exchange": exchange_for(u), "expiries": [e.isoformat() for e in exps], "lot_size": lot}
+            except Exception as exc:
+                out[u] = {"exchange": exchange_for(u), "error": str(exc)}
+        return {"underlyings": out, "mode": self.cfg.mode, "default_product": self.cfg.product}
 
     def spot(self, underlying: str, with_ltp: bool = False, force: bool = False) -> dict:
         """The underlying index's own LTP (display only, e.g. the "NIFTY 22810" banner) - a Breeze call only
         when asked, same as contract()'s "Get LTP". Never used for any trading decision.
         force=True (an explicit refresh click) bypasses the quote_ttl_s cache with max_age=0, so a click
         right after another one still gets a real Breeze call instead of silently returning the same
-        cached price - see market.py's BreezeQuotes.ltp() for what max_age=0 does."""
-        with self.lock:
-            px = None
-            if with_ltp and hasattr(self.quotes, "spot"):
-                try:
-                    px = self.quotes.spot(underlying, max_age=0 if force else self.cfg.quote_ttl_s)
-                except Exception as exc:
-                    self.repo.set_status_value("last_error", f"spot {underlying}: {exc}")
-            return {"underlying": underlying, "spot": px}
+        cached price - see market.py's BreezeQuotes.ltp() for what max_age=0 does.
+
+        Deliberately does NOT take self.lock: this is a pure lookup (no trade/order state touched) and the
+        Breeze call is the slow part (network round-trip) - self.repo and self.quotes each guard their own
+        state internally, so holding the service-wide lock here would only serialize unrelated legs'
+        concurrent "refresh price" clicks behind each other for no reason (see market.py's _quote())."""
+        px = None
+        if with_ltp and hasattr(self.quotes, "spot"):
+            try:
+                px = self.quotes.spot(underlying, max_age=0 if force else self.cfg.quote_ttl_s)
+            except Exception as exc:
+                self.repo.set_status_value("last_error", f"spot {underlying}: {exc}")
+        return {"underlying": underlying, "spot": px}
 
     def contract(self, underlying: str, expiry: str, strike: float, option_type: str, with_ltp: bool = False,
                 force: bool = False) -> dict:
         """Contract details; the Breeze price only when asked (the form's "Get LTP" button), not on every
-        change. force=True: see spot()'s docstring - an explicit refresh always gets a fresh Breeze call."""
-        with self.lock:
-            inst = self.instruments.resolve(underlying, date.fromisoformat(expiry), strike, option_type)
-            return {"tradingsymbol": inst.tradingsymbol, "exchange": inst.exchange, "lot_size": inst.lot_size,
-                    "tick_size": inst.tick_size,
-                    "ltp": self._ltp_safe(inst, max_age=0 if force else self.cfg.quote_ttl_s) if with_ltp else None}
+        change. force=True: see spot()'s docstring - an explicit refresh always gets a fresh Breeze call.
+        No self.lock either, for the same reason as spot() - see its docstring."""
+        inst = self.instruments.resolve(underlying, date.fromisoformat(expiry), strike, option_type)
+        return {"tradingsymbol": inst.tradingsymbol, "exchange": inst.exchange, "lot_size": inst.lot_size,
+                "tick_size": inst.tick_size,
+                "ltp": self._ltp_safe(inst, max_age=0 if force else self.cfg.quote_ttl_s) if with_ltp else None}

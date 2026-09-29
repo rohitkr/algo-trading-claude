@@ -113,11 +113,26 @@ function restoreConfig() {
   updateOrderTypeHint(); updateTrailingVisibility(); updateSlCostState();
 }
 
+// Skeleton rows in place of the legs table the instant the instrument changes, so the OLD instrument's
+// data disappears immediately instead of sitting on screen (looking live) until the new one finishes
+// loading - renderLegs() below overwrites this the moment the real data is ready. Built with the SAME
+// 11 <td>s as a real leg row (not one colspan cell) so it inherits the exact same row height from
+// .leg-table td's own padding - a shorter placeholder caused a layout jump when it swapped for real rows.
+function legSkeletonRow() {
+  const w = [14, 16, 28, 90, 70, 28, 36, 50, 90, 90, 20];
+  return `<tr class="skeleton-leg">${w.map((px) => `<td><div class="skeleton-bar" style="width:${px}px"></div></td>`).join("")}</tr>`;
+}
+function showLegsLoading() {
+  const rows = Math.max(LEGS.length, 1);
+  $("#leg-tbody").innerHTML = legSkeletonRow().repeat(rows);
+}
+
 async function onBaseUnderlying() {
   const info = META.underlyings[$("#base-underlying").value] || {};
   $("#base-expiry").innerHTML = (info.expiries || []).map((e) => `<option>${esc(e)}</option>`).join("");
   if (RESTORING && STORED?.expiry && (info.expiries || []).includes(STORED.expiry)) $("#base-expiry").value = STORED.expiry;
   $("#base-spot-symbol").textContent = $("#base-underlying").value;
+  if (!RESTORING) showLegsLoading();
   await refreshSpot();
   // Changing the instrument governs every leg row (their own expiry dropdown is built from THIS
   // underlying's expiries via `leg.underlying`, so it must be kept in sync or it keeps showing the old
@@ -129,17 +144,34 @@ async function onBaseUnderlying() {
   saveStored();
 }
 
-async function refreshSpot(force) {
-  SPOT = null; $("#base-spot").textContent = "–";
+async function refreshSpot(force, keepDisplay) {
+  if (!keepDisplay) { SPOT = null; $("#base-spot").textContent = "–"; }   // switching instrument: old price is meaningless
   try {
     const s = await api(`/api/spot?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent($("#base-underlying").value)}`);
     SPOT = s.spot; $("#base-spot").textContent = s.spot == null ? "no price" : money(s.spot);
   } catch (e) { /* leave as no price */ }
 }
+function flash(el) { if (el) { el.classList.remove("value-flash"); void el.offsetWidth; el.classList.add("value-flash"); } }
 // An explicit button click always gets a real Breeze call (force=1, bypasses the quote-interval cache) -
 // the passive auto-fetch on selection keeps the normal cache so browsing strikes doesn't burn the budget.
-$("#refresh-spot").onclick = async () => { await refreshSpot(true); renderLegs(); };
-$("#refresh-prices").onclick = () => LEGS.forEach((l) => fetchLegPrice(l, true));
+// The button spins while the call is in flight and the price flashes on return - even when the fetched
+// price happens to equal what was already shown, the click visibly did something (Sensibull-style cue).
+$("#refresh-spot").onclick = async () => {
+  const btn = $("#refresh-spot");
+  btn.classList.add("spinning");
+  try { await refreshSpot(true, true); renderLegs(); flash($("#base-spot")); }
+  finally { btn.classList.remove("spinning"); }
+};
+$("#refresh-prices").onclick = async () => {
+  const btn = $("#refresh-prices");
+  btn.classList.add("spinning");
+  try {
+    await Promise.all(LEGS.map((l) => fetchLegPrice(l, true)));
+    $$(".price-cell input").forEach(flash);
+  } finally {
+    btn.classList.remove("spinning");
+  }
+};
 
 async function onBaseExpiry(resetStrikes) {
   const u = $("#base-underlying").value, e = $("#base-expiry").value;
@@ -653,7 +685,7 @@ function strategyCard(s) {
     const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${qtyText}</td>
     <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-    <td>${num(t.kite_ltp ?? t.last_ltp)}</td>
+    <td data-ltp-cell="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
     <td>${num(t.current_sl)}</td><td>${num(t.target)}</td>
     <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}">${money(t.pnl)}</td>
     <td>${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
@@ -802,9 +834,23 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (eid) return editLeg(Number(eid));
   const sid = ev.target.dataset.strategyLtp;
   if (sid) {
-    const s = (await api(`/api/strategies/${sid}`)).strategy;
-    await Promise.all(s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status)).map((t) => refreshLegLtp(t.id)));
-    return refreshStrategies();
+    const btn = ev.target;
+    btn.classList.add("spinning");
+    try {
+      const s = (await api(`/api/strategies/${sid}`)).strategy;
+      const legIds = s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status)).map((t) => t.id);
+      await Promise.all(legIds.map((tid) => refreshLegLtp(tid)));
+      await refreshStrategies();
+      // Flash each refreshed leg's LTP cell so a click that fetched an unchanged price still reads as
+      // "it worked" (data-ltp-cell survives the innerHTML replace since refreshStrategies just re-rendered).
+      legIds.forEach((tid) => {
+        const cell = $(`[data-ltp-cell="${tid}"]`);
+        if (cell) { cell.classList.remove("ltp-flash"); void cell.offsetWidth; cell.classList.add("ltp-flash"); }
+      });
+    } finally {
+      btn.classList.remove("spinning");
+    }
+    return;
   }
 });
 
@@ -818,6 +864,7 @@ loadMeta().then(() => {
     addLeg();
   }
   RESTORING = false;
-}).catch((e) => { $("#form-hint").textContent = "Could not load instruments: " + e.message; RESTORING = false; });
+}).catch((e) => { $("#form-hint").textContent = "Could not load instruments: " + e.message; RESTORING = false; })
+  .finally(() => { $("#page-loading").classList.add("hidden"); });
 refreshStrategies();
 setInterval(refreshStrategies, 2000);

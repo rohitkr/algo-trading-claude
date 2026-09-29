@@ -14,6 +14,24 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+/* Full-page overlay shown from first paint until /api/meta resolves (instrument list load, which is
+   slower the first time in a day an exchange - e.g. BFO for SENSEX - hasn't been read yet). */
+.page-loading {
+  position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px; background: var(--bg); color: var(--muted); font-size: 13px;
+}
+.page-loading.hidden { display: none; }
+.spinner-lg {
+  width: 28px; height: 28px; border: 3px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: ltp-spin .7s linear infinite;
+}
+/* Skeleton rows shown in the legs table the instant the underlying dropdown changes, replacing the
+   OLD instrument's leg rows immediately rather than leaving them on screen until the new instrument's
+   expiries/strikes/prices finish loading (which can take a couple of seconds on a cold exchange).
+   30px = a real leg row's own content height (42.7px row - .leg-table td's 6px+6px padding) - matching
+   this exactly avoids the page jumping/reflowing when the skeleton swaps out for real rows. */
+.skeleton-bar { height: 30px; border-radius: 4px; background: linear-gradient(90deg, var(--card2) 25%, var(--line) 50%, var(--card2) 75%); background-size: 200% 100%; animation: skeleton-shimmer 1.2s ease-in-out infinite; }
+@keyframes skeleton-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .banner { padding: 8px 16px; font-weight: 700; color: #fff; background: var(--paper); position: sticky; top: 0; z-index: 5; }
 .banner.live { background: var(--live); font-size: 16px; letter-spacing: .5px; }
 .halt { padding: 8px 16px; background: var(--warn); color: #fff; font-weight: 600; }
@@ -78,8 +96,32 @@ output { font-weight: 700; }
 #refresh-spot { background: var(--card); }
 .base-select { margin-bottom: 12px; }
 .leg-table th button { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 0 0 4px; }
-.ltp-refresh { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 0 0 2px; }
+.ltp-refresh { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 0 0 2px; position: relative; }
 .ltp-refresh:hover { color: var(--fg); }
+/* Brief spin-in-place while a refresh click is in flight, so the user sees the click registered even
+   when the fetched price turns out to equal what was already shown (nothing else would visibly change). */
+.ltp-refresh.spinning { color: transparent; }
+.ltp-refresh.spinning::after {
+  content: ""; position: absolute; top: 50%; left: 50%; width: 11px; height: 11px;
+  margin: -5.5px 0 0 -5.5px; border: 2px solid var(--accent); border-top-color: transparent;
+  border-radius: 50%; animation: ltp-spin .6s linear infinite;
+}
+@keyframes ltp-spin { to { transform: rotate(360deg); } }
+/* Momentary highlight on a leg's LTP cell right after a refresh brings back a (possibly unchanged) price -
+   confirms the click did something, matching Sensibull's flash-on-refresh cue. */
+.ltp-flash, .value-flash { animation: ltp-flash-anim .7s ease-out; border-radius: 4px; }
+@keyframes ltp-flash-anim {
+  0% { background: rgba(111,140,255,.35); }
+  100% { background: transparent; }
+}
+/* Small spinner badge in a button's top-right corner while its click is in flight (Spot / all-legs price
+   refresh) - the button keeps its own label/icon, unlike .ltp-refresh which is icon-only and swaps in place. */
+.spin-btn { position: relative; }
+.spin-btn.spinning::after {
+  content: ""; position: absolute; top: -4px; right: -4px; width: 10px; height: 10px;
+  border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%;
+  animation: ltp-spin .6s linear infinite; background: var(--card);
+}
 
 .leg-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }

@@ -74,8 +74,11 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path == "/api/dashboard":
                     return self._json(200, svc.dashboard())
                 if u.path == "/api/strikes":
-                    with svc.lock:
-                        strikes = svc.instruments.strikes(q["underlying"], date.fromisoformat(q["expiry"]))
+                    # No svc.lock: a strike list is a pure instrument-book lookup, and the first request for
+                    # an exchange not yet cached today (e.g. switching to SENSEX/BFO) has to load and parse
+                    # that exchange's whole instrument dump - see service.py's meta() docstring for why that
+                    # must not block the live monitor tick.
+                    strikes = svc.instruments.strikes(q["underlying"], date.fromisoformat(q["expiry"]))
                     return self._json(200, {"strikes": strikes})
                 if u.path == "/api/contract":
                     return self._json(200, svc.contract(q["underlying"], q["expiry"], float(q["strike"]), q["option_type"],

@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/static/strategy.css">
 </head>
 <body>
+<div id="page-loading" class="page-loading"><div class="spinner-lg"></div><span>Loading instruments…</span></div>
 <div id="banner" class="banner">Loading…</div>
 <div id="halt" class="halt hidden"></div>
 <header class="topbar">
@@ -103,7 +104,7 @@
     <div class="spot-panel">
       <div class="spot-symbol" id="base-spot-symbol">–</div>
       <div class="spot-value" id="base-spot">–</div>
-      <button type="button" id="refresh-spot" title="Refresh spot price">↻ Spot</button>
+      <button type="button" id="refresh-spot" class="spin-btn" title="Refresh spot price">↻ Spot</button>
     </div>
     <div class="grid3 base-select">
       <label>Instrument <select id="base-underlying"></select></label>
@@ -123,7 +124,7 @@
       <table class="leg-table" id="leg-table">
         <thead><tr>
           <th></th><th></th><th>B/S</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Lots</th>
-          <th>Price <button type="button" id="refresh-prices" title="Refresh LTP for every leg">↻</button></th>
+          <th>Price <button type="button" id="refresh-prices" class="spin-btn" title="Refresh LTP for every leg">↻</button></th>
           <th>SL (optional)</th><th>TP (optional)</th><th></th>
         </tr></thead>
         <tbody id="leg-tbody"></tbody>

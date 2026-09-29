@@ -641,3 +641,38 @@ def test_refresh_ltp_works_on_a_pending_unfilled_trade(tmp_path):
     r.price(95)
     res = r.svc.refresh_ltp(tid)
     assert res["last_ltp"] == 95
+
+
+def test_refresh_ltp_survives_trade_closing_mid_refresh(tmp_path, monkeypatch):
+    # refresh_ltp's network calls (Breeze quote, broker snapshot) now run without self.lock held, so a
+    # trade can transition (e.g. exited by the monitor's own tick) in the window between the unlocked
+    # fetch and the re-lock - it must not resurrect or overwrite a trade that closed in the meantime.
+    r = Rig(tmp_path)
+    tid = _active(r)
+    orig_snapshot = r.svc.broker.snapshot
+
+    def closing_snapshot(now):
+        r.repo.set_status(tid, L.EXITED, "TEST_CLOSE", expect=L.POSITION_ACTIVE)
+        return orig_snapshot(now)
+    monkeypatch.setattr(r.svc.broker, "snapshot", closing_snapshot)
+
+    res = r.svc.refresh_ltp(tid)          # must not raise
+    assert res["status"] == L.EXITED      # and must not resurrect the closed trade
+
+
+def test_refresh_ltp_also_refreshes_kite_ltp(tmp_path, monkeypatch):
+    # The table displays kite_ltp ?? last_ltp, so a manual refresh has to move kite_ltp too - otherwise a
+    # stale kite_ltp (e.g. from a broker snapshot that's been failing) permanently hides the fresh Breeze
+    # price the click just fetched into last_ltp.
+    r = Rig(tmp_path)
+    tid = _active(r)
+    orig_positions = r.ex.positions
+
+    def fake_positions():
+        d = orig_positions()
+        for p in d["net"]:
+            p["last_price"] = 123.0
+        return d
+    monkeypatch.setattr(r.ex, "positions", fake_positions)
+    res = r.svc.refresh_ltp(tid)
+    assert res["kite_ltp"] == 123.0
