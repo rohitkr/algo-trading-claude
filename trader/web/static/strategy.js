@@ -500,65 +500,102 @@ $("#lot-multiplier").addEventListener("change", () => {
 });
 
 // ---------------------------------------------------------------- drag to reorder
-// The <tr> is draggable ONLY while the mouse is down on its ⠿ handle (armed on handle mousedown, disarmed
-// on mouseup/dragend) - marking the whole row draggable all the time swallows ordinary clicks on the
-// buttons/inputs inside it (a real mouse/trackpad click always has a little drift, which a permanently
-// draggable row can misread as a drag start instead of a click).
-let DRAG_ID = null;
-$("#leg-tbody").addEventListener("mousedown", (ev) => {
-  if (!ev.target.closest(".drag-handle")) return;
-  const row = ev.target.closest("tr[data-id]");
-  if (row) row.draggable = true;
-});
-function disarmDrag() {
-  $$("#leg-tbody tr[data-id]").forEach((r) => { r.draggable = false; });
+// ONE implementation for every re-orderable table (the builder's legs AND the order-confirmation popup): drag the
+// ⠿ handle; the dragged row fades (and follows the cursor as the browser's drag image), and an accent line shows
+// where it will land - above or below the row under the pointer. onMove(fromKey, overKey, above) does the move.
+// Mouse/pen use native HTML5 drag; the row is draggable ONLY while its handle is held (a permanently draggable
+// row swallows ordinary clicks on its inputs/buttons: real clicks drift a little and read as drag starts).
+// Touch uses pointer events with the same visual cues, since native drag does not start from a finger.
+function enableRowDrag(container, keyAttr, onMove) {
+  const rowOf = (el) => el?.closest?.(`tr[${keyAttr}]`);
+  const keyOf = (row) => row.getAttribute(keyAttr);
+  let dragKey = null;
+  const clearMarks = () => container.querySelectorAll("tr.drop-above, tr.drop-below")
+    .forEach((r) => r.classList.remove("drop-above", "drop-below"));
+  const isAbove = (row, y) => y < row.getBoundingClientRect().top + row.offsetHeight / 2;
+  const mark = (row, y) => {
+    clearMarks();
+    if (row && dragKey !== null && keyOf(row) !== dragKey) row.classList.add(isAbove(row, y) ? "drop-above" : "drop-below");
+  };
+  const finish = (row, y) => {
+    const from = dragKey;
+    dragKey = null;
+    clearMarks();
+    container.querySelectorAll("tr.dragging").forEach((r) => r.classList.remove("dragging"));
+    if (row && from !== null && keyOf(row) !== from) onMove(from, keyOf(row), isAbove(row, y));
+  };
+  const disarm = () => container.querySelectorAll(`tr[${keyAttr}]`).forEach((r) => { r.draggable = false; });
+  container.addEventListener("mousedown", (ev) => {
+    if (!ev.target.closest(".drag-handle")) return;
+    const row = rowOf(ev.target);
+    if (row) row.draggable = true;
+  });
+  container.addEventListener("mouseup", disarm);
+  container.addEventListener("dragstart", (ev) => {
+    const row = rowOf(ev.target);
+    if (!row) return;
+    dragKey = keyOf(row);
+    ev.dataTransfer.effectAllowed = "move";
+    ev.dataTransfer.setData("text/plain", dragKey);   // Firefox requires data to be set to drag at all
+    row.classList.add("dragging");
+  });
+  container.addEventListener("dragend", (ev) => {
+    rowOf(ev.target)?.classList.remove("dragging");
+    disarm();
+    clearMarks();
+    dragKey = null;
+  });
+  container.addEventListener("dragover", (ev) => {
+    if (dragKey === null) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = "move";
+    mark(rowOf(ev.target), ev.clientY);
+  });
+  container.addEventListener("dragleave", (ev) => { if (!container.contains(ev.relatedTarget)) clearMarks(); });
+  container.addEventListener("drop", (ev) => {
+    if (dragKey === null) return;
+    ev.preventDefault();
+    finish(rowOf(ev.target), ev.clientY);
+    disarm();
+  });
+  container.addEventListener("pointerdown", (ev) => {          // touch only; mouse/pen take the native path
+    if (ev.pointerType !== "touch" || !ev.target.closest(".drag-handle")) return;
+    const row = rowOf(ev.target);
+    if (!row) return;
+    ev.preventDefault();
+    dragKey = keyOf(row);
+    row.classList.add("dragging");
+    const at = (e) => rowOf(document.elementFromPoint(e.clientX, e.clientY));
+    const move = (e) => { if (e.pointerId === ev.pointerId) mark(at(e), e.clientY); };
+    const up = (e) => {
+      if (e.pointerId !== ev.pointerId) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      finish(e.type === "pointerup" ? at(e) : null, e.clientY);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  });
 }
-$("#leg-tbody").addEventListener("mouseup", disarmDrag);
-$("#leg-tbody").addEventListener("dragstart", (ev) => {
-  const row = ev.target.closest("tr[data-id]");
-  if (!row) return;
-  DRAG_ID = Number(row.dataset.id);
-  ev.dataTransfer.effectAllowed = "move";
-  ev.dataTransfer.setData("text/plain", String(DRAG_ID));   // Firefox requires data to be set to drag at all
-  row.classList.add("dragging");
-});
-$("#leg-tbody").addEventListener("dragend", (ev) => {
-  const row = ev.target.closest("tr[data-id]");
-  if (row) row.classList.remove("dragging");
-  disarmDrag();
-  clearDropMarks();
-});
-function clearDropMarks() { $$("#leg-tbody tr").forEach((r) => r.classList.remove("drop-above", "drop-below")); }
-$("#leg-tbody").addEventListener("dragover", (ev) => {
-  ev.preventDefault();
-  ev.dataTransfer.dropEffect = "move";
-  const row = ev.target.closest("tr[data-id]");
-  clearDropMarks();
-  if (!row || DRAG_ID == null || Number(row.dataset.id) === DRAG_ID) return;
-  const above = ev.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
-  row.classList.add(above ? "drop-above" : "drop-below");
-});
-$("#leg-tbody").addEventListener("dragleave", (ev) => {
-  if (!ev.target.closest("#leg-tbody")?.contains(ev.relatedTarget)) clearDropMarks();
-});
-$("#leg-tbody").addEventListener("drop", (ev) => {
-  ev.preventDefault();
-  clearDropMarks();
-  const row = ev.target.closest("tr[data-id]");
-  if (!row || DRAG_ID == null) return;
-  const overId = Number(row.dataset.id);
-  if (overId === DRAG_ID) return;
-  const above = ev.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
-  const from = LEGS.findIndex((l) => l.id === DRAG_ID);
-  const overIndex = LEGS.findIndex((l) => l.id === overId);
+
+// Builder legs (table order = the strategy's leg order).
+enableRowDrag($("#leg-tbody"), "data-id", (fromKey, overKey, above) => {
+  const from = LEGS.findIndex((l) => l.id === Number(fromKey));
+  const overIndex = LEGS.findIndex((l) => l.id === Number(overKey));
   if (from === -1 || overIndex === -1) return;
   let insertAt = above ? overIndex : overIndex + 1;
   const [moved] = LEGS.splice(from, 1);        // removing `from` shifts every later index left by one
   if (from < insertAt) insertAt -= 1;
   LEGS.splice(insertAt, 0, moved);
-  DRAG_ID = null;
   renderLegs();
 });
+
+// Order-confirmation popup (popup order = execution order). Registered once on the dialog body, which persists
+// while its table is redrawn; confirmOrders() sets the handler while the popup is open.
+let ORDER_MOVE = null;
+enableRowDrag($("#dlg-body"), "data-row", (fromKey, overKey, above) => ORDER_MOVE?.(Number(fromKey), Number(overKey), above));
 
 // ---------------------------------------------------------------- templates
 function applyTemplate(kind) {
@@ -629,20 +666,91 @@ function dialog(title, html, live = false) {
 function alertBox(title, lines) { dialog(title, `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`); $("#dlg-ok").classList.add("hidden"); }
 
 // ---------------------------------------------------------------- trade all
+// Order confirmation: the EXECUTION order (default: all BUY legs, then SELL legs - hedges first) and Market/Limit
+// per leg. Re-arranging here never changes the leg order in the builder table above.
+function confirmOrders(active) {
+  let rows = [...active.filter((l) => l.side === "BUY"), ...active.filter((l) => l.side !== "BUY")]
+    .map((l) => ({leg: l, type: "LIMIT", price: l.entry_price}));
+  const d = $("#dlg");
+  $("#dlg-title").textContent = `Place ${rows.length} order(s)`;
+  $("#dlg-live").classList.toggle("hidden", MODE !== "LIVE");
+  $("#dlg-ok").classList.remove("hidden");
+  const draw = () => {
+    const sellFirst = rows.findIndex((r) => r.leg.side === "SELL") < rows.map((r) => r.leg.side).lastIndexOf("BUY") &&
+      rows.some((r) => r.leg.side === "SELL");
+    $("#dlg-body").innerHTML = `
+      <div class="order-all">All legs: <button type="button" data-all="LIMIT">Limit</button>
+        <button type="button" data-all="MARKET">Market</button></div>
+      <table class="order-confirm"><tr><th></th><th>#</th><th>Side</th><th>Contract</th><th>Lots</th><th>Type</th><th>Price</th><th>Order</th></tr>
+      ${rows.map((r, i) => `<tr data-row="${i}">
+        <td class="drag-handle" data-drag="${i}" title="Drag to re-arrange" aria-label="Drag to re-arrange">⠿</td>
+        <td>${i + 1}</td><td class="${r.leg.side}">${r.leg.side} ${r.leg.option_type}</td>
+        <td>${esc(r.leg.underlying)} ${r.leg.strike}</td><td>${r.leg.lots}</td>
+        <td><select data-type="${i}"><option value="LIMIT"${r.type === "LIMIT" ? " selected" : ""}>Limit</option>
+          <option value="MARKET"${r.type === "MARKET" ? " selected" : ""}>Market</option></select></td>
+        <td>${r.type === "LIMIT" ? `<input type="number" step="0.05" min="0.05" data-price="${i}" value="${r.price ?? ""}" required>`
+          : `<span class="hint small">at market</span>`}</td>
+        <td><button type="button" data-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
+          <button type="button" data-down="${i}" ${i === rows.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button></td>
+      </tr>`).join("")}</table>
+      <p class="hint small">Orders are sent top to bottom: drag ⠿ (or use ↑ ↓) to re-arrange. Market = marketable limit at the live price (fills at once, protected
+        from bad fills). If any leg fails its checks, nothing is sent; if a BUY (hedge) fails, the SELL legs are not sent.</p>
+      ${sellFirst ? `<p class="strategy-warning">⚠ A SELL leg is placed before a BUY leg: it goes in unhedged for a moment and
+        needs more margin. Move BUY legs up unless you mean it.</p>` : ""}`;
+  };
+  return new Promise((resolve) => {
+    const body = $("#dlg-body");
+    body.onclick = (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.all) rows.forEach((r) => { r.type = b.dataset.all; });
+      const i = Number(b.dataset.up ?? b.dataset.down);
+      if (b.dataset.up !== undefined) [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]];
+      if (b.dataset.down !== undefined) [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]];
+      draw();
+    };
+    body.onchange = (e) => {
+      const t = e.target;
+      if (t.dataset.type !== undefined) { rows[Number(t.dataset.type)].type = t.value; draw(); }
+      if (t.dataset.price !== undefined) rows[Number(t.dataset.price)].price = t.value === "" ? null : Number(t.value);
+    };
+    body.oninput = body.onchange;
+    ORDER_MOVE = (from, over, above) => {               // same drag + visual cues as the builder's legs
+      const moved = rows[from];
+      const rest = rows.filter((_, i) => i !== from);
+      let at = rest.indexOf(rows[over]);
+      if (!above) at += 1;
+      rest.splice(at, 0, moved);
+      rows = rest;
+      draw();
+    };
+    d.onclose = () => {
+      body.onclick = body.onchange = body.oninput = null;
+      ORDER_MOVE = null;
+      if (d.returnValue !== "ok") return resolve(null);
+      const bad = rows.find((r) => r.type === "LIMIT" && !(r.price > 0));
+      if (bad) { alertBox("Price needed", [`${bad.leg.side} ${bad.leg.option_type} ${bad.leg.strike}: enter a limit price or choose Market`]); return resolve(null); }
+      resolve(rows.map((r) => ({...r.leg, price_type: r.type, entry_price: r.type === "LIMIT" ? r.price : r.leg.entry_price})));
+    };
+    d.returnValue = "";
+    draw();
+    d.showModal();
+  });
+}
+
 $("#trade-all").onclick = async () => {
   const active = LEGS.filter((l) => l.checked);
   if (!active.length) return alertBox("Nothing to trade", ["select at least one leg"]);
-  const rows = active.map((l) => `<tr><td>${l.side} ${l.option_type}</td><td>${esc(l.underlying)} ${l.strike}</td>
-    <td>${l.lots} lot(s)</td><td>${l.entry_price == null ? "market/no price" : money(l.entry_price)}</td></tr>`).join("");
-  const ok = await dialog(`Trade ${active.length} leg(s)?`,
-    `<table><tr><th>Side</th><th>Contract</th><th>Qty</th><th>Price</th></tr>${rows}</table>`, MODE === "LIVE");
-  if (!ok) return;
+  const ordered = await confirmOrders(active);
+  if (!ordered) return;
   $("#trade-all").disabled = true;
   try {
-    const res = await api("/api/strategies/trade_all", {config: collectConfig(), legs: active});
+    const res = await api("/api/strategies/trade_all", {config: collectConfig(), legs: ordered, keep_order: true});
     if (!res.ok) return alertBox("Not placed", res.errors || ["unknown error"]);
     $("#form-hint").textContent = `Strategy #${res.strategy_id}: ${res.confirmed.length} leg(s) placed` +
-      (res.failed.length ? `, ${res.failed.length} failed - check the strategy card below` : "");
+      (res.failed.length ? `, ${res.failed.length} NOT placed - see the strategy card below` : "");
+    // never let a missing leg go unnoticed: say which legs did not go in, and why
+    if (res.failed.length) alertBox(`${res.failed.length} leg(s) NOT placed`, res.failed.map((f) => `#${f.trade_id}: ${f.error}`));
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
   finally { $("#trade-all").disabled = false; }
@@ -706,7 +814,10 @@ function strategyCard(s) {
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}</td></tr>`;
   }).join("");
   const cls = s.combined_pnl >= 0 ? "pos" : "neg";
-  return `<div class="strategy-card">
+  const failedLegs = s.failed_legs || [];
+  const failedHtml = failedLegs.length ? `<div class="strategy-warning" role="alert">⚠ ${failedLegs.length} leg(s) not placed:
+    <ul>${failedLegs.map((f) => `<li>${esc(f.side)} ${esc(f.tradingsymbol)}: ${esc(f.error)}</li>`).join("")}</ul></div>` : "";
+  return `<div class="strategy-card${failedLegs.length ? " has-failed-legs" : ""}">
     <div class="head">
       <span class="name">#${s.id} ${esc(s.name)}</span>
       <span class="status-pill ${esc(s.status)}">${esc(s.status)}</span>
@@ -714,6 +825,7 @@ function strategyCard(s) {
       <span class="pnl ${cls}" data-strategy-pnl="${s.id}">${money(s.combined_pnl)}</span>
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
+    ${failedHtml}
     <div class="leg-table-scroll">
     <table><tr><th>Side</th><th>Symbol</th><th>Qty</th><th>Entry</th>
       <th>LTP <button type="button" class="ltp-refresh" data-strategy-ltp="${s.id}" title="Refresh every leg's LTP now">↻</button></th>

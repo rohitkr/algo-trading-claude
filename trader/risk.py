@@ -25,9 +25,27 @@ def daily_pnl(trades_today_closed: list[dict], open_trades: list[dict]) -> float
     return round(closed + open_, 2)
 
 
+def open_positions(trades: list[dict], exclude_group: int | None = None) -> set[tuple[str, int]]:
+    """Distinct open positions: every multi-leg strategy is one, every standalone trade is one."""
+    out: set[tuple[str, int]] = set()
+    for t in trades:
+        if t["status"] not in L.OPEN_STATUSES:
+            continue
+        gid = t.get("group_id")
+        if gid is not None and gid == exclude_group:
+            continue
+        out.add(("strategy", gid) if gid is not None else ("trade", t["id"]))
+    return out
+
+
 def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange: str, underlying: str, side: str,
               lots: int, quantity: int, entry: float, stop: float, ltp: float | None, open_trades: list[dict],
-              trades_today: int, day_pnl: float, broker_net: int | None, halted: str | None) -> list[RiskCheck]:
+              trades_today: int, day_pnl: float, broker_net: int | None, halted: str | None,
+              group_id: int | None = None) -> list[RiskCheck]:
+    """Checks for opening one trade. A multi-leg strategy counts as ONE position toward max_open_trades and
+    max_trades_per_day, however many legs it has: pass the strategy's group_id for a leg, and `trades_today`
+    already excluding that strategy (Repository.confirmed_on(exclude_group=...)). Its other legs are then not
+    counted against it, so an iron condor never blocks its own SELL legs."""
     c: list[RiskCheck] = []
     add = lambda name, ok, detail="": c.append(RiskCheck(name, bool(ok), detail))  # noqa: E731
     add("not_halted", not halted, halted or "")
@@ -40,8 +58,9 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
         add("trading_end", t <= end, f"now {t:%H:%M}, end {end:%H:%M}")
     if square_off:
         add("before_square_off", t < square_off, f"square-off {square_off:%H:%M}")
-    n_open = len([x for x in open_trades if x["status"] in L.OPEN_STATUSES])
-    add("max_open_trades", n_open < cfg.max_open_trades, f"{n_open} open, limit {cfg.max_open_trades}")
+    n_open = len(open_positions(open_trades, exclude_group=group_id))
+    add("max_open_trades", n_open < cfg.max_open_trades,
+        f"{n_open} open (a multi-leg strategy counts as one), limit {cfg.max_open_trades}")
     add("max_trades_per_day", trades_today < cfg.max_trades_per_day,
         f"{trades_today} today, limit {cfg.max_trades_per_day}")
     add("max_lots_per_trade", lots <= cfg.max_lots_per_trade, f"{lots} lots, limit {cfg.max_lots_per_trade}")

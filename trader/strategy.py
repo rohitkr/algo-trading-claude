@@ -16,8 +16,11 @@ Order type (MIS | CNC | BTST) is a workflow label, not a Zerodha product:
           when it closes, so it carries overnight and is picked back up by the ordinary engine on the next
           day's run: trades already resume across restarts regardless of which day they were opened.
 
-Not implemented here (future work, see trader/README.md "Future: multi-leg"): broker-side atomic multi-leg
-entry (hedges first), unwinding partially-placed legs, combined margin, and saved/recurring strategies.
+Entry: the strategy is created first and every leg is checked as part of it (the strategy counts as ONE position
+for max-open-trades / trades-per-day). If any leg fails its checks nothing is sent; BUY (hedge) legs go first, and
+if one of them fails the SELL legs are not sent. Legs that never became positions stay on the strategy with the
+reason (`failed_legs` in the view). Not implemented (future work): broker-side atomic multi-leg entry, unwinding
+partially-placed legs, combined margin, and saved/recurring strategies.
 """
 from __future__ import annotations
 
@@ -36,6 +39,16 @@ log = logging.getLogger("trader.strategy")
 
 TRAILING_MODES = ("NONE", "LOCK_FIX", "TRAIL", "LOCK_AND_TRAIL")
 SL_TP_TYPES = ("POINTS", "PERCENT", "PRICE")
+
+
+def _never_placed(t: dict) -> bool:
+    """A leg that never became a position: blocked, not sent, or rejected by the broker (a user-cancelled leg
+    without an error is a normal cancel, not a failure)."""
+    if t["filled_qty"]:
+        return False
+    if t["status"] in (L.EXPIRED, L.REJECTED, L.ERROR):
+        return True
+    return t["status"] == L.CANCELLED and bool(t["error"])
 
 
 def _time(v) -> time | None:
@@ -128,9 +141,11 @@ class StrategyService:
                 return {"ok": False, "errors": ["at least one leg is required"]}
             if len(legs_in) > 12:
                 return {"ok": False, "errors": ["too many legs (12 max)"]}
-            # BUY legs go in before SELL legs (margin: a short's margin requirement drops once its hedge is
-            # already on) - the order the user arranged them in the UI is kept within each side.
-            legs_in = sorted(legs_in, key=lambda l: 0 if str(l.get("side") or "").upper() == "BUY" else 1)
+            # Execution order. Default: BUY legs before SELL legs (a short's margin drops once its hedge is on),
+            # keeping the user's order within each side. keep_order=true: the order the user arranged in the
+            # confirmation dialog is the execution order (the builder table's own leg order is never changed).
+            if not payload.get("keep_order"):
+                legs_in = sorted(legs_in, key=lambda l: 0 if str(l.get("side") or "").upper() == "BUY" else 1)
 
             # A square-off time already in the past (e.g. yesterday's/an earlier session's saved default,
             # still sitting in the UI when you place a new trade later in the day) can't protect anything
@@ -138,48 +153,92 @@ class StrategyService:
             # (validate()'s "auto-exit time has already passed"), same as leaving it blank.
             auto_exit = (cfg.square_off_time.strftime("%H:%M")
                         if cfg.square_off_time and cfg.square_off_time > now.time() else None)
-            previews = []
-            for i, leg in enumerate(legs_in, 1):
-                try:
-                    req = self._leg_payload(leg, cfg, auto_exit)
-                except (KeyError, ValueError) as exc:
-                    return {"ok": False, "errors": [f"leg {i}: {exc}"]}
-                p = self.svc.preview(req)           # preview only STORES a DRAFT row; nothing is placed yet
-                if not p["ok"]:
-                    tag = f"{req.get('side')} {req.get('option_type')} {req.get('strike')}"
-                    errs = [f"leg {i} ({tag}): {e}" for e in p["errors"]]
-                    failed = [f"leg {i} ({tag}): {c['name']} ({c['detail']})"
-                              for c in (p.get("risk") or []) if not c["passed"]]
-                    return {"ok": False, "errors": errs + failed}
-                previews.append((leg, p))
-
+            # The strategy exists BEFORE its legs are checked, so every leg is risk-checked as part of it: the
+            # whole strategy is ONE position for max-open-trades / trades-per-day (risk.pre_trade), and a leg
+            # never blocks its own siblings (the old bug: an iron condor's SELL legs refused as "3 open").
             sid = self.repo.insert_strategy(dict(mode=self.svc.cfg.mode,
                                                  name=cfg.name or f"Strategy {now:%H:%M:%S}",
                                                  config=json.dumps(cfg.to_json())))
+            previews, errors = [], []
+            for i, leg in enumerate(legs_in, 1):
+                tag = f"{leg.get('side')} {leg.get('option_type')} {leg.get('strike')}"
+                try:
+                    req = self._leg_payload(leg, cfg, auto_exit)
+                except (KeyError, ValueError) as exc:
+                    errors.append(f"leg {i} ({tag}): {exc}")
+                    continue
+                # preview only STORES the leg (grouped); nothing is placed yet
+                p = self.svc.preview(req, group_id=sid, leg_role=str(leg.get("leg_role") or "") or None)
+                if not p["ok"]:
+                    errors += [f"leg {i} ({tag}): {e}" for e in p["errors"]]
+                    errors += [f"leg {i} ({tag}): {c['name']} ({c['detail']})"
+                               for c in (p.get("risk") or []) if not c["passed"]]
+                    continue
+                previews.append((leg, p))
+            if errors:
+                # All-or-nothing: if ANY leg fails its checks, NO leg is sent (never half an iron condor).
+                for _, p in previews:
+                    self._not_placed(p["trade_id"], "not placed: another leg of this strategy failed its checks")
+                self.repo.discard_strategy(sid)      # nothing was placed: no strategy card, reasons returned
+                self.svc.audit(None, "STRATEGY_REJECTED", "WARNING", {"errors": errors})
+                return {"ok": False, "errors": errors}
+
             confirmed, failed = [], []
+            hedge_failed = None
             for leg, p in previews:
+                side = str(leg.get("side") or "").upper()
+                if hedge_failed and side == "SELL":
+                    # a hedge (BUY) leg did not go in: selling now would leave an unhedged short - don't
+                    reason = f"not placed: hedge leg failed ({hedge_failed})"
+                    self._not_placed(p["trade_id"], reason)
+                    failed.append({"trade_id": p["trade_id"], "error": reason})
+                    continue
                 try:
                     self.svc.confirm(p["trade_id"], p["token"])
-                    self.repo.update_trade(p["trade_id"], group_id=sid, leg_role=str(leg.get("leg_role") or ""))
                     confirmed.append(p["trade_id"])
                 except ActionError as exc:
+                    # confirm() may fail before it records anything (e.g. Zerodha unreachable): make sure the leg is
+                    # closed out WITH its reason so it shows on the strategy (no-op if confirm already did that)
+                    self._not_placed(p["trade_id"], f"not placed: {exc}")
                     failed.append({"trade_id": p["trade_id"], "error": str(exc)})
+                    if side == "BUY":
+                        hedge_failed = str(exc)
             if not confirmed:
-                self.repo.update_strategy(sid, status="CANCELLED", exit_reason="every leg failed to confirm")
+                self.repo.update_strategy(sid, status="CANCELLED", exit_reason="every leg failed to confirm",
+                                          exit_time=self.repo.now())
             self.svc.audit(None, "STRATEGY_CREATED", "WARNING" if failed else "INFO",
                            {"strategy_id": sid, "confirmed": confirmed, "failed": failed})
             return {"ok": bool(confirmed), "strategy_id": sid, "confirmed": confirmed, "failed": failed}
+
+    def _not_placed(self, trade_id: int, reason: str) -> None:
+        """A READY leg that will never be sent: EXPIRED with the reason, kept on the strategy so it shows."""
+        t = self.repo.trade(trade_id)
+        if t and t["status"] in (L.DRAFT, L.READY):
+            self.svc._transition(t, L.EXPIRED, "LEG_NOT_PLACED", "WARNING", {"reason": reason}, error=reason)
 
     def _leg_payload(self, leg: dict, cfg: GlobalConfig, auto_exit: str | None) -> dict:
         side = str(leg.get("side") or "").upper()
         if side not in ("BUY", "SELL"):
             raise ValueError("side must be BUY or SELL")
-        entry_price = _num(leg.get("entry_price"))
-        if not entry_price or entry_price <= 0:
-            raise ValueError("entry price is required")
+        price_type = str(leg.get("price_type") or "LIMIT").upper()
+        if price_type not in ("LIMIT", "MARKET"):
+            raise ValueError("price type must be LIMIT or MARKET")
         inst = self.svc.instruments.resolve(str(leg.get("underlying") or "").upper(),
                                             date.fromisoformat(str(leg.get("expiry"))),
                                             float(leg["strike"]), str(leg.get("option_type") or "").upper())
+        if price_type == "MARKET":
+            # "Market" = a marketable LIMIT at the live price +/- TRADER_EXIT_BUFFER_PCT (the same way exits are
+            # priced): fills at once like a market order, but can never fill at an absurd price in a thin option
+            # or outside the exchange's price band (Zerodha restricts plain MARKET orders on options anyway).
+            ltp = self.svc._ltp_safe(inst, max_age=self.svc.cfg.quote_ttl_s)
+            if not ltp:
+                raise ValueError("no live price for a Market order: use Limit with a price")
+            buf = self.svc.cfg.exit_buffer_pct / 100
+            entry_price = round_to_tick(ltp * (1 + buf if side == "BUY" else 1 - buf), inst.tick_size, side)
+        else:
+            entry_price = _num(leg.get("entry_price"))
+            if not entry_price or entry_price <= 0:
+                raise ValueError("entry price is required")
         qty = (leg.get("lots") or 1) * inst.lot_size
         stop_loss = _resolve_price(entry_price, side, "sl", _num(leg.get("sl_value")), str(leg.get("sl_type") or "POINTS").upper())
         target = _resolve_price(entry_price, side, "tp", _num(leg.get("tp_value")), str(leg.get("tp_type") or "POINTS").upper())
@@ -201,7 +260,7 @@ class StrategyService:
                    option_type=leg.get("option_type"), side=side, lots=leg.get("lots") or 1,
                    entry_price=entry_price, stop_loss=stop_loss, target=target,
                    product=_product_for(cfg.order_type), order_type=cfg.order_type,
-                   auto_exit_time=auto_exit)
+                   auto_exit_time=auto_exit, price_type=price_type)
 
     # -- per-tick monitoring: combined P&L rules only, nothing per-leg is touched except as noted -------
     def tick(self, now: datetime) -> None:
@@ -308,6 +367,10 @@ class StrategyService:
         v["legs"] = [self.svc.trade_view(t["id"]) for t in legs]
         v["combined_pnl"] = combined
         v["open_legs"] = len(open_legs)
+        # legs that never became a position (blocked, not placed, rejected by the broker): shown on the card
+        v["failed_legs"] = [{"id": t["id"], "side": t["side"], "tradingsymbol": t["tradingsymbol"],
+                             "status": t["status"], "error": t["error"] or t["status"]}
+                            for t in legs if _never_placed(t)]
         return v
 
     def dashboard(self) -> list[dict]:

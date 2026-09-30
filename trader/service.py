@@ -111,20 +111,22 @@ class TradeService:
         except KeyError as exc:
             raise ActionError(str(exc).strip('"')) from None
 
-    def _risk(self, *, inst, req: TradeRequest, quantity: int, ltp, snap: Snapshot | None) -> list:
+    def _risk(self, *, inst, req: TradeRequest, quantity: int, ltp, snap: Snapshot | None,
+              group_id: int | None = None) -> list:
         now = self.clock()
         open_trades = self.repo.trades(L.OPEN_STATUSES)
         pnl = daily_pnl(self.repo.closed_on(now.date()), open_trades)
         return pre_trade(self.cfg, now=now, tradingsymbol=inst.tradingsymbol, exchange=inst.exchange,
                          underlying=req.underlying, side=req.side, lots=req.lots, quantity=quantity,
                          entry=req.entry_price, stop=req.stop_loss, ltp=ltp, open_trades=open_trades,
-                         trades_today=self.repo.confirmed_on(now.date()), day_pnl=pnl,
+                         trades_today=self.repo.confirmed_on(now.date(), exclude_group=group_id), day_pnl=pnl,
                          broker_net=snap.net_any_product(inst.exchange, inst.tradingsymbol) if snap else None,
-                         halted=self.halted())
+                         halted=self.halted(), group_id=group_id)
 
-    def preview(self, payload: dict) -> dict:
+    def preview(self, payload: dict, group_id: int | None = None, leg_role: str | None = None) -> dict:
         """Validate + risk-check a trade and store it (DRAFT -> READY). Places nothing. Returns a single-use
-        confirm token when everything passes."""
+        confirm token when everything passes. group_id: the multi-leg strategy this leg belongs to (set by
+        StrategyService only, never taken from the request body); the strategy counts as one position."""
         with self.lock:
             now = self.clock()
             try:
@@ -159,6 +161,7 @@ class TradeService:
                 partial_enabled=int(req.partial_enabled), partial_lots=req.partial_lots if req.partial_enabled else None,
                 partial_qty=partial_qty, partial_price=req.partial_price if req.partial_enabled else None,
                 auto_exit_at=auto_exit_at.isoformat(timespec="seconds") if auto_exit_at else None,
+                group_id=group_id, leg_role=leg_role or None,
                 status=L.DRAFT))
             self.audit(tid, "TRADE_CREATED", "INFO", {"request": payload, "tradingsymbol": inst.tradingsymbol,
                                                        "lot_size": inst.lot_size, "quantity": qty})
@@ -168,7 +171,7 @@ class TradeService:
             except Exception as exc:
                 snap = None
                 self._broker_error("snapshot (preview)", exc)
-            checks = self._risk(inst=inst, req=req, quantity=qty, ltp=ltp, snap=snap)
+            checks = self._risk(inst=inst, req=req, quantity=qty, ltp=ltp, snap=snap, group_id=group_id)
             risk_failed = [c for c in checks if not c.passed]
             self.audit(tid, "VALIDATION_FAILED" if errors else "VALIDATION_PASSED", "WARNING" if errors else "INFO",
                        {"errors": errors})
@@ -203,7 +206,8 @@ class TradeService:
             except Exception as exc:
                 self._broker_error("snapshot (confirm)", exc)
                 raise ActionError(f"cannot reach Zerodha to check positions: {exc}") from None
-            checks = self._risk(inst=inst, req=req, quantity=t["quantity"], ltp=ltp, snap=snap)
+            checks = self._risk(inst=inst, req=req, quantity=t["quantity"], ltp=ltp, snap=snap,
+                                group_id=t.get("group_id"))
             failed = [c for c in checks if not c.passed]
             self.audit(trade_id, "RISK_CHECK", "WARNING" if failed else "INFO",
                        {"at": "confirm", "checks": [vars(c) for c in checks]})
@@ -429,9 +433,10 @@ class TradeService:
                 risk = pre_trade(self.cfg, now=now, tradingsymbol=t["tradingsymbol"], exchange=t["exchange"],
                                  underlying=t["underlying"], side=t["side"], lots=req.lots, quantity=req.lots * lot,
                                  entry=req.entry_price, stop=req.stop_loss, ltp=ltp, open_trades=others,
-                                 trades_today=self.repo.confirmed_on(now.date()) - 1,
+                                 trades_today=(self.repo.confirmed_on(now.date(), exclude_group=t["group_id"])
+                                               if t.get("group_id") else self.repo.confirmed_on(now.date()) - 1),
                                  day_pnl=daily_pnl(self.repo.closed_on(now.date()), self.repo.trades(L.OPEN_STATUSES)),
-                                 broker_net=net, halted=self.halted())
+                                 broker_net=net, halted=self.halted(), group_id=t.get("group_id"))
                 # a working entry is not re-checked against things that only apply to opening a new trade
                 risk = [c for c in risk if c.name not in ("ltp_not_through_stop",) or q["filled"] == 0]
             else:

@@ -324,9 +324,15 @@ class Repository:
             "SELECT * FROM trades WHERE status IN ('EXITED','MANUALLY_EXITED') AND substr(exit_time,1,10)=?",
             (day.isoformat(),))]
 
-    def confirmed_on(self, day: date) -> int:
-        return int(self.conn.execute("SELECT COUNT(*) FROM trades WHERE substr(confirmed_at,1,10)=?",
-                                     (day.isoformat(),)).fetchone()[0])
+    def confirmed_on(self, day: date, exclude_group: int | None = None) -> int:
+        """Positions opened on `day`: a multi-leg strategy counts once, however many legs it placed."""
+        sql = ("SELECT COUNT(DISTINCT CASE WHEN group_id IS NOT NULL THEN 'g' || group_id ELSE 't' || id END) "
+               "FROM trades WHERE substr(confirmed_at,1,10)=?")
+        args: list = [day.isoformat()]
+        if exclude_group is not None:
+            sql += " AND (group_id IS NULL OR group_id != ?)"
+            args.append(exclude_group)
+        return int(self.conn.execute(sql, args).fetchone()[0])
 
     def trades_by_group(self, group_id: int) -> list[dict]:
         return [dict(r) for r in self.conn.execute(
@@ -352,6 +358,13 @@ class Repository:
             sql += f" AND status IN ({', '.join('?' * len(st))})"
             args += st
         return [dict(r) for r in self.conn.execute(sql + " ORDER BY id DESC", args)]
+
+    def discard_strategy(self, strategy_id: int) -> None:
+        """A strategy that placed nothing (rejected before any order): ungroup its never-placed legs and remove it.
+        The legs' own rows and audit events stay."""
+        with self.tx() as c:
+            c.execute("UPDATE trades SET group_id=NULL WHERE group_id=?", (strategy_id,))
+            c.execute("DELETE FROM strategies WHERE id=?", (strategy_id,))
 
     def update_strategy(self, strategy_id: int, **fields) -> None:
         fields = {**fields, "updated_at": self.now()}

@@ -144,9 +144,10 @@ table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }
 .leg-table .strike-cell input, .leg-table .lots-cell input { -moz-appearance: textfield; }
 .drag-handle { cursor: grab; color: var(--muted); text-align: center; width: 18px; user-select: none; }
 .drag-handle:active { cursor: grabbing; }
-.leg-table tr.dragging { opacity: .4; }
-.leg-table tr.drop-above { box-shadow: inset 0 2px 0 0 var(--accent); }
-.leg-table tr.drop-below { box-shadow: inset 0 -2px 0 0 var(--accent); }
+.leg-table tr.dragging, table.order-confirm tr.dragging { opacity: .4; }
+.leg-table tr.drop-above, table.order-confirm tr.drop-above { box-shadow: inset 0 2px 0 0 var(--accent); }
+.leg-table tr.drop-below, table.order-confirm tr.drop-below { box-shadow: inset 0 -2px 0 0 var(--accent); }
+.drag-handle { touch-action: none; }
 .leg-table .price-cell input { width: 66px; }
 .leg-table .slp-cell { display: flex; gap: 3px; }
 .leg-table .slp-cell input { width: 52px; } .leg-table .slp-cell select { width: 78px; }
@@ -221,3 +222,14 @@ menu { display: flex; justify-content: flex-end; gap: 8px; }
 .hidden { display: none !important; }
 /* live.js: LTP / spot are pushed while streaming, so their manual refresh buttons are hidden */
 .live-prices #refresh-spot, .live-prices .ltp-refresh { display: none; }
+/* legs that never became positions (blocked / not placed / rejected): impossible to miss */
+.strategy-card.has-failed-legs { border-color: var(--sell); }
+.strategy-warning { margin: 8px 0; padding: 8px 10px; border-radius: 6px; color: var(--sell);
+  background: color-mix(in srgb, var(--sell) 10%, transparent); font-size: 13px; }
+.strategy-warning ul { margin: 4px 0 0 18px; padding: 0; }
+/* order confirmation: execution order + Market/Limit */
+.order-all { margin-bottom: 8px; font-size: 13px; }
+.order-all button { margin-left: 4px; }
+table.order-confirm input[type=number] { width: 90px; }
+table.order-confirm button { padding: 2px 8px; }
+table.order-confirm .drag-handle { font-size: 16px; padding: 0 6px; }

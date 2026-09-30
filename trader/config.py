@@ -27,7 +27,7 @@ Safety: TRADER_MODE defaults to PAPER (simulated exchange, no Zerodha orders). A
 | TRADER_SL_MAX_MODIFICATIONS       | 20                         | Kite allows ~25 modifications per order; replace the SL order after this many |
 | TRADER_STOP_GRACE_SECONDS         | 10                         | LTP beyond SL this long while the SL order is unfilled -> make it marketable |
 | **Risk (checked server-side before every entry)** |            |                                                          |
-| TRADER_MAX_OPEN_TRADES            | 3                          | simultaneous trades (pending entries count)              |
+| TRADER_MAX_OPEN_TRADES            | 3                          | simultaneous positions (pending entries count); a multi-leg strategy counts as ONE |
 | TRADER_MAX_LOTS_PER_TRADE         | 10                         |                                                          |
 | TRADER_MAX_QTY_PER_TRADE          | 1000                       | units                                                    |
 | TRADER_MAX_ORDER_VALUE            | 500000                     | entry price x quantity (0 = off)                         |
@@ -35,7 +35,7 @@ Safety: TRADER_MODE defaults to PAPER (simulated exchange, no Zerodha orders). A
 | TRADER_MAX_DAILY_LOSS             | 20000                      | realised + unrealised today <= -this: new trades blocked (0 = off) |
 | TRADER_MAX_DAILY_PROFIT           | 0                          | >= this: new trades blocked (0 = off)                    |
 | TRADER_SQUARE_OFF_ON_DAILY_LIMIT  | false                      | also exit every open trade when a daily limit is hit     |
-| TRADER_MAX_TRADES_PER_DAY         | 10                         | confirmed entries today                                  |
+| TRADER_MAX_TRADES_PER_DAY         | 10                         | positions opened today; a multi-leg strategy counts as ONE |
 | TRADER_TRADING_START              | 09:15                      | no entries before (blank = off)                          |
 | TRADER_TRADING_END                | 15:00                      | no entries after (blank = off)                           |
 | TRADER_SQUARE_OFF_TIME            | 15:15                      | every open trade is exited (AUTO_EXIT); blank = off, allowed for NRML only |
