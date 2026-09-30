@@ -330,6 +330,23 @@ Live.onPrice((k, px) => { if (k === $("#price-value").dataset.price) SPOT = px; 
 function setHTML(el, html) { if (el._html !== html) { el.innerHTML = html; el._html = html; } }
 const ltpCell = (t) => `<span data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</span>`;
 
+// Completed trades: filtered by the date they closed and paged (open trades are the Active table, never filtered).
+let COMPLETED = [];
+const DONE_FILTER = HistoryFilter.create($("#completed-filter"), "completed-trades", () => renderCompleted());
+const completedRow = (t) => `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td>
+    <td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td><td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
+    <td class="num">${num(t.exit_avg_price)}</td>
+    <td class="num">${ltpCell(t)}</td>
+    <td class="num">${t.filled_qty}/${t.quantity}</td><td class="num ${cls(t.pnl)}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
+    <td>${esc(t.exit_reason || t.error || "")}</td><td>${t.duration_s ? Math.round(t.duration_s / 60) + " min" : "–"}</td>
+    <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}</span></td></tr>`;
+function renderCompleted() {
+  const {page, total} = DONE_FILTER.apply(COMPLETED, (t) => t.exit_time || t.updated_at || t.created_at, () => false);
+  setHTML($("#completed tbody"), page.map(completedRow).join("") ||
+    `<tr><td colspan="11">${total || !COMPLETED.length ? "None yet" : "No completed trades in this date range"}</td></tr>`);
+  Live.reapply();
+}
+
 async function refresh() {
   let d;
   try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "Server unreachable: " + e.message; return; }
@@ -347,11 +364,11 @@ async function refresh() {
     const canExit = !["ERROR", "UNKNOWN_REQUIRES_RECONCILIATION"].includes(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
     const sl = t.current_sl !== t.initial_sl ? `${num(t.current_sl)} <small>(was ${num(t.initial_sl)})</small>` : num(t.current_sl);
     return `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td><td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td>
-      <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-      <td>${ltpCell(t)}</td>
-      <td>${sl}${t.sl_software_only ? " ⚠" : ""}</td>
-      <td>${num(t.target)}</td><td>${t.quantity}</td><td>${t.filled_qty}${t.open_qty !== t.filled_qty ? ` (open ${t.open_qty})` : ""}</td>
-      <td class="${cls(t.pnl)}" data-trade-pnl="${t.id}">${money(t.pnl)}</td><td class="${cls(t.pnl)}" data-trade-pnlpct="${t.id}">${t.pnl_pct == null ? "–" : t.pnl_pct + "%"}</td>
+      <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
+      <td class="num">${ltpCell(t)}</td>
+      <td class="num">${sl}${t.sl_software_only ? " ⚠" : ""}</td>
+      <td class="num">${num(t.target)}</td><td class="num">${t.quantity}</td><td class="num">${t.filled_qty}${t.open_qty !== t.filled_qty ? ` (open ${t.open_qty})` : ""}</td>
+      <td class="num ${cls(t.pnl)}" data-trade-pnl="${t.id}">${money(t.pnl)}</td><td class="num ${cls(t.pnl)}" data-trade-pnlpct="${t.id}">${t.pnl_pct == null ? "–" : t.pnl_pct + "%"}</td>
       <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</span></td>
       <td>${tm(t.entry_time)}</td><td>${tm(t.updated_at)}</td>
       <td>${working ? `<button data-act="CANCEL" data-id="${t.id}">Cancel entry</button>` : ""}
@@ -359,14 +376,8 @@ async function refresh() {
           ${canExit ? `<button data-act="EXIT" data-id="${t.id}" class="danger">Exit</button>` : ""}</td></tr>`;
   }).join("") || `<tr><td colspan="15">No active trades</td></tr>`);
 
-  setHTML($("#completed tbody"), d.completed.map((t) => `<tr class="clickable" data-id="${t.id}"><td>${t.id}</td>
-    <td>${esc(t.tradingsymbol)}</td><td class="${t.side}">${t.side}</td><td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-    <td>${num(t.exit_avg_price)}</td>
-    <td>${ltpCell(t)}</td>
-    <td>${t.filled_qty}/${t.quantity}</td><td class="${cls(t.pnl)}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
-    <td>${esc(t.exit_reason || t.error || "")}</td><td>${t.duration_s ? Math.round(t.duration_s / 60) + " min" : "–"}</td>
-    <td><span class="status ${BAD.has(t.status) ? "bad" : ""}">${esc(t.status)}</span></td></tr>`).join("") ||
-    `<tr><td colspan="11">None yet</td></tr>`);
+  COMPLETED = d.completed;
+  renderCompleted();
 
   const s = d.system, v = (k) => (s[k] || {}).value;
   const broker = v("broker") || {}, rec = v("reconciliation") || {}, proc = v("process") || {};

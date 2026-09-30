@@ -233,3 +233,26 @@ menu { display: flex; justify-content: flex-end; gap: 8px; }
 table.order-confirm input[type=number] { width: 90px; }
 table.order-confirm button { padding: 2px 8px; }
 table.order-confirm .drag-handle { font-size: 16px; padding: 0 6px; }
+
+/* Stable tables: ticking prices must never shift columns or rows. Fixed-width digits, right-aligned numbers with
+   room reserved for a minus sign and extra digits, no wrapping in numeric cells. */
+table { font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+td.num { min-width: 9ch; }
+td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
+[data-strategy-pnl] { display: inline-block; min-width: 12ch; text-align: right; font-variant-numeric: tabular-nums; }
+/* history filter bar */
+.history-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 6px 0 10px; font-size: 13px; }
+.history-bar label { display: inline-flex; align-items: center; gap: 6px; }
+.history-pager { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.history-pager [data-h="info"] { min-width: 11ch; text-align: center; font-variant-numeric: tabular-nums; }
+.hidden { display: none !important; }
+/* strategy legs: fixed layout, so column widths never depend on the (ticking) contents */
+.strategy-card table.legs-live { table-layout: fixed; width: 100%; min-width: 820px; }
+.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 18%; } .legs-live .c-qty { width: 8%; }
+.legs-live .c-px { width: 8%; } .legs-live .c-pnl { width: 11%; } .legs-live .c-status { width: 12%; }
+.legs-live .c-act { width: 17%; }
+/* one line per leg whatever its state: buttons and status never wrap (full status on hover) */
+.legs-live td.leg-actions { white-space: nowrap; }
+.legs-live td:nth-child(9) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legs-live td.sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1216,7 +1216,7 @@ class TradeService:
     def dashboard(self) -> dict:
         with self.lock:
             active = [self._view(t) for t in self.repo.trades(L.OPEN_STATUSES)]
-            done = [self._view(t) for t in self.repo.trades(L.TERMINAL - {L.EXPIRED}, limit=100)]
+            done = [self._view(t) for t in self.repo.trades(L.TERMINAL - {L.EXPIRED}, limit=500)]   # UI filters/pages these
             st = self.repo.status_values()
             return {"mode": self.cfg.mode, "live": self.cfg.live, "now": self.repo.now(), "active": active,
                     "completed": done, "halted": self.halted(),

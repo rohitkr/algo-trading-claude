@@ -803,12 +803,12 @@ function strategyCard(s) {
     // position to exit, just an order to pull before it fills.
     const canCancel = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status) && t.filled_qty === 0;
     const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
-    return `<tr><td>${t.side}</td><td>${esc(t.tradingsymbol)}</td><td>${qtyText}</td>
-    <td>${num(t.entry_avg_price ?? t.entry_price)}</td>
-    <td data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
-    <td>${num(t.current_sl)}</td><td>${num(t.target)}</td>
-    <td class="${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
-    <td>${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
+    return `<tr><td>${t.side}</td><td class="sym">${esc(t.tradingsymbol)}</td><td class="num">${qtyText}</td>
+    <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
+    <td class="num" data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
+    <td class="num">${num(t.current_sl)}</td><td class="num">${num(t.target)}</td>
+    <td class="num ${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
+    <td title="${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}">${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}</td></tr>`;
@@ -827,9 +827,9 @@ function strategyCard(s) {
     </div>
     ${failedHtml}
     <div class="leg-table-scroll">
-    <table><tr><th>Side</th><th>Symbol</th><th>Qty</th><th>Entry</th>
-      <th>LTP <button type="button" class="ltp-refresh" data-strategy-ltp="${s.id}" title="Refresh every leg's LTP now">↻</button></th>
-      <th>SL</th><th>TP</th><th>P&amp;L</th><th>Status</th><th></th></tr>${legRows}</table>
+    <table class="legs-live"><tr><th class="c-side">Side</th><th class="c-sym">Symbol</th><th class="num c-qty">Qty</th><th class="num c-px">Entry</th>
+      <th class="num c-px">LTP <button type="button" class="ltp-refresh" data-strategy-ltp="${s.id}" title="Refresh every leg's LTP now">↻</button></th>
+      <th class="num c-px">SL</th><th class="num c-px">TP</th><th class="num c-pnl">P&amp;L</th><th class="c-status">Status</th><th class="c-act"></th></tr>${legRows}</table>
     </div>
   </div>`;
 }
@@ -933,6 +933,18 @@ async function cancelLeg(tid) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
+// Running strategies are always listed first; finished ones are history, filtered by date and paged.
+let STRATEGIES = [];
+const STRAT_FILTER = HistoryFilter.create($("#strategies-filter"), "strategies", () => renderStrategies());
+function renderStrategies() {
+  const {pinned, page, total} = STRAT_FILTER.apply(STRATEGIES, (s) => s.created_at, (s) => s.status === "ACTIVE");
+  const html = [...pinned, ...page].map(strategyCard).join("") ||
+    `<p class="hint small">${total || STRATEGIES.length ? "No finished strategies in this date range." : "No strategies yet."}</p>`;
+  const list = $("#strategies-list");
+  if (list._html !== html) { list.innerHTML = html; list._html = html; }   // unchanged state: leave the DOM alone
+  Live.reapply();
+}
+
 async function refreshStrategies() {
   let d;
   try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "Server unreachable: " + e.message; return; }
@@ -944,11 +956,8 @@ async function refreshStrategies() {
   h.classList.toggle("hidden", !d.halted);
   if (d.halted) h.textContent = `New trades blocked: ${d.halted}`;
   try {
-    const sd = await api("/api/strategies");
-    const html = sd.strategies.map(strategyCard).join("") || `<p class="hint small">No strategies yet.</p>`;
-    const list = $("#strategies-list");
-    if (list._html !== html) { list.innerHTML = html; list._html = html; }   // unchanged state: leave the DOM alone
-    Live.reapply();
+    STRATEGIES = (await api("/api/strategies")).strategies;
+    renderStrategies();
   } catch (e) { /* keep the last render */ }
 }
 // Manual LTP refresh: no click-count limit of our own (max_age=0 on every call) - Breeze's own daily

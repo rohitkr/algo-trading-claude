@@ -63,3 +63,17 @@ pre { white-space:pre-wrap; font-size:12px; }
 /* live.js: prices are pushed, so the manual refresh buttons are only shown without a live stream */
 .live-prices #get-ltp { display:none; }
 .sltp-row { display: flex; gap: 6px; } .sltp-row input { flex: 1; min-width: 0; }
+
+/* Stable tables: ticking prices must never shift columns or rows. Fixed-width digits, right-aligned numbers with
+   room reserved for a minus sign and extra digits, no wrapping in numeric cells. */
+table { font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+td.num { min-width: 9ch; }
+td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
+[data-strategy-pnl] { display: inline-block; min-width: 12ch; text-align: right; font-variant-numeric: tabular-nums; }
+/* history filter bar */
+.history-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 6px 0 10px; font-size: 13px; }
+.history-bar label { display: inline-flex; align-items: center; gap: 6px; }
+.history-pager { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.history-pager [data-h="info"] { min-width: 11ch; text-align: center; font-variant-numeric: tabular-nums; }
+.hidden { display: none !important; }
