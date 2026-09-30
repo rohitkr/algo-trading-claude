@@ -51,8 +51,10 @@
         </div>
         <div class="option-ltp-row">Option LTP <output id="opt-ltp">–</output></div>
         <div class="grid order-grid">
-          <label>Stop-loss ₹ <input name="stop_loss" type="number" step="0.05" min="0.05" required></label>
-          <label>Target ₹ <input name="target" type="number" step="0.05" min="0.05"></label>
+          <label>Stop-loss <span class="sltp-row"><input name="stop_loss" type="number" step="any" min="0" required>
+            <select name="sl_mode" aria-label="Stop-loss as"><option value="price">₹ price</option><option value="points">points</option></select></span></label>
+          <label>Target <span class="sltp-row"><input name="target" type="number" step="any" min="0">
+            <select name="tp_mode" aria-label="Target as"><option value="price">₹ price</option><option value="points">points</option></select></span></label>
         </div>
         <div id="pnl-preview" class="pnl-preview hidden">
           <span>Max loss at SL <b id="pnl-loss" class="neg"></b></span>

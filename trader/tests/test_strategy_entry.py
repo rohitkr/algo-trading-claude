@@ -165,3 +165,13 @@ def test_default_execution_order_is_buy_first(tmp_path) -> None:
     res = strat.create_and_trade(iron_condor())
     assert res["ok"], res
     assert [r.trade(t)["side"] for t in res["confirmed"]] == ["BUY", "BUY", "SELL", "SELL"]
+
+
+def test_limit_prices_are_rounded_to_the_tick_not_rejected(tmp_path) -> None:
+    r, strat = rig(tmp_path)
+    payload = iron_condor()
+    payload["legs"][2]["entry_price"] = 60.03                           # BUY 24900 PE, typed off-tick
+    res = strat.create_and_trade(payload)
+    assert res["ok"] and len(res["confirmed"]) == 4, res
+    leg = next(r.trade(t) for t in res["confirmed"] if r.trade(t)["tradingsymbol"] == SYM[(24900, "PE")])
+    assert leg["entry_price"] == 60.05

@@ -239,6 +239,7 @@ class StrategyService:
             entry_price = _num(leg.get("entry_price"))
             if not entry_price or entry_price <= 0:
                 raise ValueError("entry price is required")
+            entry_price = round(round(entry_price / inst.tick_size) * inst.tick_size, 2)   # nearest tick
         qty = (leg.get("lots") or 1) * inst.lot_size
         stop_loss = _resolve_price(entry_price, side, "sl", _num(leg.get("sl_value")), str(leg.get("sl_type") or "POINTS").upper())
         target = _resolve_price(entry_price, side, "tp", _num(leg.get("tp_value")), str(leg.get("tp_type") or "POINTS").upper())

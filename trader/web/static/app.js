@@ -6,7 +6,7 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<
 const money = (v) => (v == null ? "–" : "₹" + Number(v).toLocaleString("en-IN", {maximumFractionDigits: 2}));
 const num = (v) => (v == null || v === "" ? "–" : Number(v).toLocaleString("en-IN", {maximumFractionDigits: 2}));
 const tm = (s) => (s ? String(s).replace("T", " ").slice(5, 19) : "–");
-let META = null, MODE = "PAPER", LOT = null, SYMBOL = null, SPOT = null;
+let META = null, MODE = "PAPER", LOT = null, SYMBOL = null, SPOT = null, TICK = null;
 
 // ---------------------------------------------------------------- persisted form (survives refresh)
 const STORE_KEY = "trader:form:v1";
@@ -14,7 +14,10 @@ function loadStored() {
   try { return JSON.parse(localStorage.getItem(STORE_KEY) || "null") || {}; } catch (e) { return {}; }
 }
 function saveStored() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(formData())); } catch (e) { /* private window etc: ignore */ }
+  // raw typed values (points stay points) + the chosen modes, not the converted prices
+  const raw = {...Object.fromEntries(new FormData(form).entries()),
+               trail_enabled: $("#trail_enabled").checked, partial_enabled: $("#partial_enabled").checked};
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(raw)); } catch (e) { /* private window etc: ignore */ }
 }
 const STORED = loadStored();
 function restoreRadio(name, fallback) {
@@ -40,9 +43,23 @@ async function api(path, body) {
 
 // ---------------------------------------------------------------- form
 const form = $("#form");
+// SL / target can be typed as an absolute ₹ price (BUY @420: SL 400, TP 500) or as points from the entry
+// (BUY @420: SL 20, TP 80 -> 400 / 500; SELL legs the other way round). Points become a tick-rounded price here,
+// so everything downstream (preview, checks, server) only ever sees prices.
+const toTickPrice = (v) => { const t = TICK || 0.05; return Math.round(Math.round(v / t) * t * 100) / 100; };
+function pointsToPrice(d, key, mode, dir) {
+  if (d[mode] !== "points" || d[key] === "" || d[key] == null || d.entry_price === "") return;
+  const entry = Number(d.entry_price), pts = Number(d[key]);
+  if (!Number.isFinite(entry) || !Number.isFinite(pts)) return;
+  d[key] = String(toTickPrice(entry + dir * pts));
+}
 function formData() {
   const d = Object.fromEntries(new FormData(form).entries());
   d.trail_enabled = $("#trail_enabled").checked; d.partial_enabled = $("#partial_enabled").checked;
+  const buy = d.side === "BUY";
+  pointsToPrice(d, "stop_loss", "sl_mode", buy ? -1 : 1);
+  pointsToPrice(d, "target", "tp_mode", buy ? 1 : -1);
+  delete d.sl_mode; delete d.tp_mode;
   return d;
 }
 
@@ -56,7 +73,7 @@ async function loadMeta() {
   restoreRadio("product", "NRML");                    // NRML by default, not MIS
   for (const f of ["lots", "entry_price", "stop_loss", "target", "trail_type", "trail_value", "trail_step",
                     "partial_lots", "partial_price", "auto_exit_time"]) restoreValue(f);
-  restoreValue("trail_enabled"); restoreValue("partial_enabled");
+  restoreValue("trail_enabled"); restoreValue("partial_enabled"); restoreValue("sl_mode"); restoreValue("tp_mode");
   await onUnderlying();
 }
 
@@ -119,7 +136,7 @@ async function onContract() {
   if (!d.expiry || !d.strike) return;
   try {
     const c = await api(`/api/contract?underlying=${encodeURIComponent(d.underlying)}&expiry=${d.expiry}&strike=${d.strike}&option_type=${d.option_type}`);
-    LOT = c.lot_size; SYMBOL = c.tradingsymbol;
+    LOT = c.lot_size; SYMBOL = c.tradingsymbol; TICK = c.tick_size;
     $("#opt-ltp").textContent = "–";
     $("#opt-ltp").dataset.price = `${c.exchange}:${c.tradingsymbol}`;
     $("#opt-ltp").dataset.fmt = "money";

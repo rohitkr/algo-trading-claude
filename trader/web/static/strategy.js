@@ -261,20 +261,20 @@ function legRow(leg) {
     </div></td>
     <td><button type="button" class="bs-btn ${leg.option_type === "CE" ? "ce" : "pe"}" data-act="type">${leg.option_type}</button></td>
     <td class="lots-cell"><input type="number" min="1" step="1" data-f="lots" value="${leg.lots}"></td>
-    <td class="price-cell"><input type="number" step="0.05" min="0.05" data-f="entry_price" value="${leg.entry_price ?? ""}" placeholder="LTP"></td>
+    <td class="price-cell"><input type="number" step="any" min="0" data-f="entry_price" value="${leg.entry_price ?? ""}" placeholder="LTP"></td>
     <td><div class="slp-cell">
-      <input type="number" step="0.05" min="0" data-f="sl_value" value="${leg.sl_value ?? ""}" placeholder="optional">
+      <input type="number" step="any" min="0" data-f="sl_value" value="${leg.sl_value ?? ""}" placeholder="optional">
       <select data-f="sl_type">
         <option value="POINTS" ${leg.sl_type === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${leg.sl_type === "PERCENT" ? "selected" : ""}>SL%</option>
-        <option value="PRICE" ${leg.sl_type === "PRICE" ? "selected" : ""}>On price</option>
+        <option value="PRICE" ${leg.sl_type === "PRICE" ? "selected" : ""}>Price ₹</option>
       </select></div></td>
     <td><div class="slp-cell">
-      <input type="number" step="0.05" min="0" data-f="tp_value" value="${leg.tp_value ?? ""}" placeholder="optional">
+      <input type="number" step="any" min="0" data-f="tp_value" value="${leg.tp_value ?? ""}" placeholder="optional">
       <select data-f="tp_type">
         <option value="POINTS" ${leg.tp_type === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${leg.tp_type === "PERCENT" ? "selected" : ""}>TP%</option>
-        <option value="PRICE" ${leg.tp_type === "PRICE" ? "selected" : ""}>On price</option>
+        <option value="PRICE" ${leg.tp_type === "PRICE" ? "selected" : ""}>Price ₹</option>
       </select></div></td>
     <td><button type="button" class="leg-del" data-act="del" title="Remove leg">✕</button></td>
   </tr>`;
@@ -688,7 +688,7 @@ function confirmOrders(active) {
         <td>${esc(r.leg.underlying)} ${r.leg.strike}</td><td>${r.leg.lots}</td>
         <td><select data-type="${i}"><option value="LIMIT"${r.type === "LIMIT" ? " selected" : ""}>Limit</option>
           <option value="MARKET"${r.type === "MARKET" ? " selected" : ""}>Market</option></select></td>
-        <td>${r.type === "LIMIT" ? `<input type="number" step="0.05" min="0.05" data-price="${i}" value="${r.price ?? ""}" required>`
+        <td>${r.type === "LIMIT" ? `<input type="number" step="any" min="0" data-price="${i}" value="${r.price ?? ""}" required>`
           : `<span class="hint small">at market</span>`}</td>
         <td><button type="button" data-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
           <button type="button" data-down="${i}" ${i === rows.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button></td>
@@ -836,6 +836,11 @@ function strategyCard(s) {
 
 // Points/percent/price <-> absolute price, for one side (kind: "sl" or "tp") - the same convention the
 // leg-creation table and legSlTpPrices() use: BUY target above entry & stop below, SELL the reverse.
+/** Nearest multiple of the tick (2-decimal clean): the server only accepts tick-multiple prices. */
+function toTick(price, tick) {
+  if (price == null || !Number.isFinite(price) || !(tick > 0)) return price;
+  return Math.round(Math.round(price / tick) * tick * 100) / 100;
+}
 function slTpValueToPrice(entry, side, kind, value, typ) {
   if (value == null || value === "" || entry == null) return null;
   if (typ === "PRICE") return Number(value);
@@ -857,7 +862,7 @@ async function editLeg(tid) {
     // Before the entry order has filled, entry price (and lots) are still changeable, same as the
     // single-trade page's edit form - only once it starts filling does the limit price stop making sense.
     const entryOpen = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status);
-    const f = (name, label, val, attrs = 'type="number" step="0.05"') =>
+    const f = (name, label, val, attrs = 'type="number" step="any" min="0"') =>
       `<label>${label} <input name="${name}" ${attrs} value="${val ?? ""}"></label>`;
     // Points/%/Price, same as when the leg was created, default Points - shown pre-converted from the
     // current absolute SL/target so the dialog opens already reflecting today's values.
@@ -865,15 +870,15 @@ async function editLeg(tid) {
     const typeOpts = (kind, sel) => `
         <option value="POINTS" ${sel === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${sel === "PERCENT" ? "selected" : ""}>${kind === "sl" ? "SL%" : "TP%"}</option>
-        <option value="PRICE" ${sel === "PRICE" ? "selected" : ""}>On price</option>`;
+        <option value="PRICE" ${sel === "PRICE" ? "selected" : ""}>Price ₹</option>`;
     const html = `<div id="leg-edit-form" class="edit-leg-grid">
       ${entryOpen ? f("entry_price", "Entry limit ₹", t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
       <label>Stop-loss <span class="slp-cell">
-        <input id="edit-sl-value" type="number" step="0.05" value="${priceToPoints(ref, t.side, "sl", t.current_sl)}">
+        <input id="edit-sl-value" type="number" step="any" min="0" value="${priceToPoints(ref, t.side, "sl", t.current_sl)}">
         <select id="edit-sl-type">${typeOpts("sl", "POINTS")}</select>
       </span></label>
       <label>Target (blank = none) <span class="slp-cell">
-        <input id="edit-tp-value" type="number" step="0.05" value="${t.target != null ? priceToPoints(ref, t.side, "tp", t.target) : ""}">
+        <input id="edit-tp-value" type="number" step="any" min="0" value="${t.target != null ? priceToPoints(ref, t.side, "tp", t.target) : ""}">
         <select id="edit-tp-type">${typeOpts("tp", "POINTS")}</select>
       </span></label>
     </div>`;
@@ -882,8 +887,12 @@ async function editLeg(tid) {
     const changes = {};
     $$("#leg-edit-form input[name]").forEach((el) => { changes[el.name] = el.value; });
     const slVal = $("#edit-sl-value").value, tpVal = $("#edit-tp-value").value;
-    const slPrice = slTpValueToPrice(ref, t.side, "sl", slVal, $("#edit-sl-type").value);
-    const tpPrice = tpVal === "" ? null : slTpValueToPrice(ref, t.side, "tp", tpVal, $("#edit-tp-type").value);
+    // any number is accepted in the box (points, %, price); the resulting PRICE is rounded to the contract's
+    // tick here, so e.g. "10 points" from a 68.53 average fill becomes 58.55, not a rejected 58.53
+    const tick = Number(t.tick_size) || 0.05;
+    const slPrice = toTick(slTpValueToPrice(ref, t.side, "sl", slVal, $("#edit-sl-type").value), tick);
+    const tpPrice = tpVal === "" ? null : toTick(slTpValueToPrice(ref, t.side, "tp", tpVal, $("#edit-tp-type").value), tick);
+    if (changes.entry_price !== undefined && changes.entry_price !== "") changes.entry_price = toTick(Number(changes.entry_price), tick);
     if (slPrice != null) changes.stop_loss = slPrice;
     changes.target = tpPrice ?? "";
     const p = await api(`/api/trades/${tid}/edit/prepare`, {changes});

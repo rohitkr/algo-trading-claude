@@ -62,3 +62,4 @@ pre { white-space:pre-wrap; font-size:12px; }
 .subnav a:hover { text-decoration:underline; }
 /* live.js: prices are pushed, so the manual refresh buttons are only shown without a live stream */
 .live-prices #get-ltp { display:none; }
+.sltp-row { display: flex; gap: 6px; } .sltp-row input { flex: 1; min-width: 0; }
