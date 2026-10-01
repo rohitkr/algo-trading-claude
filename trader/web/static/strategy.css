@@ -256,3 +256,4 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 .legs-live td.leg-actions { white-space: nowrap; }
 .legs-live td:nth-child(9) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legs-live td.sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edit-ref { margin: 0 0 10px; font-variant-numeric: tabular-nums; }

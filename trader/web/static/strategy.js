@@ -208,6 +208,18 @@ $("#base-expiry").addEventListener("change", onBaseExpiry);
 // ---------------------------------------------------------------- legs
 function currentMultiplier() { return Number($("#lot-multiplier").value) || 1; }
 
+// The SL/TP mode (PRICE | POINTS | PERCENT) last chosen anywhere - Edit leg dialog or builder cells - is
+// remembered separately for SL and for target, and is what the next dialog / new leg starts in.
+const SLTP_MODES = ["PRICE", "POINTS", "PERCENT"];
+function rememberedMode(kind, fallback = "PRICE") {
+  try { const m = localStorage.getItem(`trader:sltp-mode:${kind}`); return SLTP_MODES.includes(m) ? m : fallback; }
+  catch (e) { return fallback; }
+}
+function rememberMode(kind, mode) {
+  if (!SLTP_MODES.includes(mode)) return;
+  try { localStorage.setItem(`trader:sltp-mode:${kind}`, mode); } catch (e) { /* private window: ignore */ }
+}
+
 function newLeg(overrides) {
   const atm = atmStrike() || 0;
   // SL/TP are optional by default: the strategy's own combined profit/loss exit can cover a leg instead
@@ -217,7 +229,8 @@ function newLeg(overrides) {
   const baseLots = (overrides && overrides.base_lots) || 1;
   const leg = {id: NEXT_ID++, side: "SELL", underlying: $("#base-underlying").value, expiry: $("#base-expiry").value,
               strike: atm, option_type: "CE", base_lots: baseLots, lots: baseLots * currentMultiplier(), entry_price: null,
-              sl_value: null, sl_type: "POINTS", tp_value: null, tp_type: "POINTS", leg_role: "", checked: true};
+              sl_value: null, sl_type: rememberedMode("sl", "POINTS"), tp_value: null, tp_type: rememberedMode("tp", "POINTS"),
+              leg_role: "", checked: true};
   return Object.assign(leg, overrides);
 }
 
@@ -487,6 +500,8 @@ $("#leg-tbody").addEventListener("change", (ev) => {
     if (v != null) leg.base_lots = Math.max(1, Math.round(v / currentMultiplier()));
   } else if (["strike", "entry_price", "sl_value", "tp_value"].includes(f)) leg[f] = ev.target.value === "" ? null : Number(ev.target.value);
   else leg[f] = ev.target.value;
+  if (f === "sl_type") rememberMode("sl", ev.target.value);
+  if (f === "tp_type") rememberMode("tp", ev.target.value);
   const refetch = f === "strike" || f === "expiry";
   renderLegs();
   if (refetch) fetchLegPrice(leg);
@@ -836,6 +851,17 @@ function strategyCard(s) {
 
 // Points/percent/price <-> absolute price, for one side (kind: "sl" or "tp") - the same convention the
 // leg-creation table and legSlTpPrices() use: BUY target above entry & stop below, SELL the reverse.
+/** Re-express an SL/TP value typed in one mode (PRICE | POINTS | PERCENT) in another, relative to `entry`.
+ * Blank stays blank. Prices are tick-rounded; points and percent are shown to 2 decimals. */
+function convertSlTp(entry, side, kind, value, from, to, tick) {
+  if (value === "" || value == null || from === to || entry == null) return value;
+  const price = slTpValueToPrice(entry, side, kind, value, from);
+  if (price == null || !Number.isFinite(price)) return value;
+  if (to === "PRICE") return toTick(price, tick);
+  const pts = priceToPoints(entry, side, kind, price);
+  return to === "PERCENT" ? Math.round((pts / entry) * 10000) / 100 : pts;
+}
+
 /** Nearest multiple of the tick (2-decimal clean): the server only accepts tick-multiple prices. */
 function toTick(price, tick) {
   if (price == null || !Number.isFinite(price) || !(tick > 0)) return price;
@@ -864,32 +890,48 @@ async function editLeg(tid) {
     const entryOpen = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status);
     const f = (name, label, val, attrs = 'type="number" step="any" min="0"') =>
       `<label>${label} <input name="${name}" ${attrs} value="${val ?? ""}"></label>`;
-    // Points/%/Price, same as when the leg was created, default Points - shown pre-converted from the
-    // current absolute SL/target so the dialog opens already reflecting today's values.
+    // The dialog opens with the CURRENT stop/target, shown in the mode last used (Price ₹ if none yet), and
+    // switching the mode converts the value shown (Price <-> Points from the avg fill <-> %) instead of keeping the
+    // raw number, so "Points" shows how far the current stop is from your entry.
     const ref = t.entry_avg_price ?? t.entry_price;
+    const tick = Number(t.tick_size) || 0.05;
+    const ltp = t.kite_ltp ?? t.last_ltp;
+    const slMode = rememberedMode("sl"), tpMode = rememberedMode("tp");
+    const shown = (kind, price, mode) => (price == null ? "" : convertSlTp(ref, t.side, kind, toTick(Number(price), tick), "PRICE", mode, tick));
     const typeOpts = (kind, sel) => `
+        <option value="PRICE" ${sel === "PRICE" ? "selected" : ""}>Price ₹</option>
         <option value="POINTS" ${sel === "POINTS" ? "selected" : ""}>Points</option>
-        <option value="PERCENT" ${sel === "PERCENT" ? "selected" : ""}>${kind === "sl" ? "SL%" : "TP%"}</option>
-        <option value="PRICE" ${sel === "PRICE" ? "selected" : ""}>Price ₹</option>`;
-    const html = `<div id="leg-edit-form" class="edit-leg-grid">
+        <option value="PERCENT" ${sel === "PERCENT" ? "selected" : ""}>${kind === "sl" ? "SL%" : "TP%"}</option>`;
+    const html = `<p class="hint small edit-ref">Entry ${t.entry_avg_price != null ? "avg" : "limit"} <b>${num(ref)}</b> ·
+        LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · current SL <b>${num(t.current_sl)}</b> ·
+        target <b>${t.target != null ? num(t.target) : "none"}</b></p>
+      <div id="leg-edit-form" class="edit-leg-grid">
       ${entryOpen ? f("entry_price", "Entry limit ₹", t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
       <label>Stop-loss <span class="slp-cell">
-        <input id="edit-sl-value" type="number" step="any" min="0" value="${priceToPoints(ref, t.side, "sl", t.current_sl)}">
-        <select id="edit-sl-type">${typeOpts("sl", "POINTS")}</select>
+        <input id="edit-sl-value" type="number" step="any" min="0" value="${shown("sl", t.current_sl, slMode)}">
+        <select id="edit-sl-type" data-prev="${slMode}">${typeOpts("sl", slMode)}</select>
       </span></label>
       <label>Target (blank = none) <span class="slp-cell">
-        <input id="edit-tp-value" type="number" step="any" min="0" value="${t.target != null ? priceToPoints(ref, t.side, "tp", t.target) : ""}">
-        <select id="edit-tp-type">${typeOpts("tp", "POINTS")}</select>
+        <input id="edit-tp-value" type="number" step="any" min="0" value="${shown("tp", t.target, tpMode)}">
+        <select id="edit-tp-type" data-prev="${tpMode}">${typeOpts("tp", tpMode)}</select>
       </span></label>
     </div>`;
-    const go = await dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html);
+    const pending = dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html);
+    for (const kind of ["sl", "tp"]) {
+      const sel = $(`#edit-${kind}-type`), box = $(`#edit-${kind}-value`);
+      sel.onchange = () => {
+        box.value = convertSlTp(ref, t.side, kind, box.value, sel.dataset.prev, sel.value, tick);
+        sel.dataset.prev = sel.value;
+        rememberMode(kind, sel.value);
+      };
+    }
+    const go = await pending;
     if (!go) return;
     const changes = {};
     $$("#leg-edit-form input[name]").forEach((el) => { changes[el.name] = el.value; });
     const slVal = $("#edit-sl-value").value, tpVal = $("#edit-tp-value").value;
     // any number is accepted in the box (points, %, price); the resulting PRICE is rounded to the contract's
     // tick here, so e.g. "10 points" from a 68.53 average fill becomes 58.55, not a rejected 58.53
-    const tick = Number(t.tick_size) || 0.05;
     const slPrice = toTick(slTpValueToPrice(ref, t.side, "sl", slVal, $("#edit-sl-type").value), tick);
     const tpPrice = tpVal === "" ? null : toTick(slTpValueToPrice(ref, t.side, "tp", tpVal, $("#edit-tp-type").value), tick);
     if (changes.entry_price !== undefined && changes.entry_price !== "") changes.entry_price = toTick(Number(changes.entry_price), tick);
