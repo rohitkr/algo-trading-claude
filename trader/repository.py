@@ -187,7 +187,9 @@ CREATE TABLE IF NOT EXISTS system_status (key TEXT PRIMARY KEY, value TEXT, upda
 ADDED_COLUMNS = {"trades": [("user_sl", "REAL"), ("group_id", "INTEGER"), ("leg_role", "TEXT"),
                             ("kite_ltp", "REAL"), ("order_type", "TEXT"), ("pending_partial_qty", "INTEGER"),
                             ("sl_auto", "INTEGER")],   # 1 = stop derived by the app (no SL chosen), follows entry edits
-                 "action_tokens": [("payload", "TEXT")]}
+                 "action_tokens": [("payload", "TEXT")],
+                 "strategies": [("pnl_base", "REAL")]}   # P&L booked before a re-entry: the strategy's own
+                                                          # profit/loss/trail rules count only what comes after
 
 TRADE_COLUMNS: set[str] = set()     # filled at first connect (PRAGMA table_info)
 ORDER_COLUMNS: set[str] = set()

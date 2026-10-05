@@ -207,8 +207,8 @@ $("#base-expiry").addEventListener("change", onBaseExpiry);
 // ---------------------------------------------------------------- legs
 function currentMultiplier() { return Number($("#lot-multiplier").value) || 1; }
 
-// The SL/TP mode (PRICE | POINTS | PERCENT) last chosen anywhere - Edit leg dialog or builder cells - is
-// remembered separately for SL and for target, and is what the next dialog / new leg starts in.
+// The SL/TP mode (PRICE | POINTS | PERCENT) last chosen is remembered separately for SL and for target, and
+// separately for the Edit leg dialog ("sl"/"tp") and the builder's new legs ("leg-sl"/"leg-tp", default Points).
 const SLTP_MODES = ["PRICE", "POINTS", "PERCENT"];
 function rememberedMode(kind, fallback = "PRICE") {
   try { const m = localStorage.getItem(`trader:sltp-mode:${kind}`); return SLTP_MODES.includes(m) ? m : fallback; }
@@ -228,7 +228,7 @@ function newLeg(overrides) {
   const baseLots = (overrides && overrides.base_lots) || 1;
   const leg = {id: NEXT_ID++, side: "SELL", underlying: $("#base-underlying").value, expiry: $("#base-expiry").value,
               strike: atm, option_type: "CE", base_lots: baseLots, lots: baseLots * currentMultiplier(), entry_price: null,
-              sl_value: null, sl_type: rememberedMode("sl", "POINTS"), tp_value: null, tp_type: rememberedMode("tp", "POINTS"),
+              sl_value: null, sl_type: rememberedMode("leg-sl", "POINTS"), tp_value: null, tp_type: rememberedMode("leg-tp", "POINTS"),
               leg_role: "", checked: true};
   return Object.assign(leg, overrides);
 }
@@ -275,14 +275,14 @@ function legRow(leg) {
     <td class="lots-cell"><input type="number" min="1" step="1" data-f="lots" value="${leg.lots}"></td>
     <td class="price-cell"><input type="number" step="any" min="0" data-f="entry_price" value="${leg.entry_price ?? ""}" placeholder="LTP"></td>
     <td><div class="slp-cell">
-      <input type="number" step="any" min="0" data-f="sl_value" value="${leg.sl_value ?? ""}" placeholder="optional">
+      <input type="number" step="any" min="0" data-f="sl_value" value="${leg.sl_value ?? ""}" placeholder="optional"${wrongSide(leg, "sl")}>
       <select data-f="sl_type">
         <option value="POINTS" ${leg.sl_type === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${leg.sl_type === "PERCENT" ? "selected" : ""}>SL%</option>
         <option value="PRICE" ${leg.sl_type === "PRICE" ? "selected" : ""}>Price ₹</option>
       </select></div></td>
     <td><div class="slp-cell">
-      <input type="number" step="any" min="0" data-f="tp_value" value="${leg.tp_value ?? ""}" placeholder="optional">
+      <input type="number" step="any" min="0" data-f="tp_value" value="${leg.tp_value ?? ""}" placeholder="optional"${wrongSide(leg, "tp")}>
       <select data-f="tp_type">
         <option value="POINTS" ${leg.tp_type === "POINTS" ? "selected" : ""}>Points</option>
         <option value="PERCENT" ${leg.tp_type === "PERCENT" ? "selected" : ""}>TP%</option>
@@ -290,6 +290,16 @@ function legRow(leg) {
       </select></div></td>
     <td><button type="button" class="leg-del" data-act="del" title="Remove leg">✕</button></td>
   </tr>`;
+}
+
+// A stop-loss / target PRICE on the wrong side of the entry: red box + the reason on hover, before placing.
+function wrongSide(leg, kind) {
+  const v = Number(leg[`${kind}_value`]), e = Number(leg.entry_price);
+  if (leg[`${kind}_type`] !== "PRICE" || !(v > 0) || !(e > 0)) return "";
+  const below = leg.side === "BUY" ? kind === "sl" : kind === "tp";      // must this one be below the entry?
+  if (below ? v < e : v > e) return "";
+  const what = kind === "sl" ? "Stop-loss" : "Target";
+  return ` class="bad" title="${leg.side}: ${what} must be ${below ? "below" : "above"} the entry ${e}"`;
 }
 
 function renderLegs() {
@@ -478,7 +488,19 @@ $("#leg-tbody").addEventListener("click", (ev) => {
   const act = ev.target.dataset.act;
   if (!leg || !act) return;
   if (act === "del") return removeLeg(id);
-  if (act === "side") { leg.side = leg.side === "BUY" ? "SELL" : "BUY"; return renderLegs(); }
+  if (act === "side") {
+    leg.side = leg.side === "BUY" ? "SELL" : "BUY";
+    // A stop-loss / target typed as a PRICE is side-specific (BUY: SL below entry; SELL: above): flip it to
+    // the other side of the entry, same distance, so B -> S never leaves a stop on the wrong side.
+    const e = Number(leg.entry_price);
+    for (const [v, t] of [["sl_value", "sl_type"], ["tp_value", "tp_type"]]) {
+      if (leg[t] === "PRICE" && leg[v] != null && e > 0) {
+        const flipped = Math.round((2 * e - Number(leg[v])) * 100) / 100;
+        leg[v] = flipped > 0 ? flipped : null;
+      }
+    }
+    return renderLegs();
+  }
   if (act === "type") {
     leg.option_type = leg.option_type === "CE" ? "PE" : "CE";
     renderLegs(); fetchLegPrice(leg);
@@ -504,8 +526,10 @@ $("#leg-tbody").addEventListener("change", (ev) => {
     if (v != null) leg.base_lots = Math.max(1, Math.round(v / currentMultiplier()));
   } else if (["strike", "entry_price", "sl_value", "tp_value"].includes(f)) leg[f] = ev.target.value === "" ? null : Number(ev.target.value);
   else leg[f] = ev.target.value;
-  if (f === "sl_type") rememberMode("sl", ev.target.value);
-  if (f === "tp_type") rememberMode("tp", ev.target.value);
+  // the builder remembers its own SL/TP type, separate from the Edit pop-up (sharing it made new legs
+  // silently start in "Price ₹" after a price-mode edit, so "20" meant ₹20, not 20 points)
+  if (f === "sl_type") rememberMode("leg-sl", ev.target.value);
+  if (f === "tp_type") rememberMode("leg-tp", ev.target.value);
   const refetch = f === "strike" || f === "expiry";
   renderLegs();
   if (refetch) fetchLegPrice(leg);
@@ -821,6 +845,9 @@ function strategyCard(s) {
     // Not yet executed at all (still resting, nothing filled): offer Cancel instead of Exit - there's no
     // position to exit, just an order to pull before it fills.
     const canCancel = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status) && t.filled_qty === 0;
+    // Add = more lots of this contract on a running leg; Re-buy / Re-sell = enter a closed leg again.
+    // Both place a NEW leg in this strategy (its own SL/target).
+    const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0;
     const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     return `<tr><td>${t.side}</td><td class="sym">${esc(t.tradingsymbol)}</td><td class="num">${qtyText}</td>
     <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
@@ -830,7 +857,9 @@ function strategyCard(s) {
     <td title="${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}">${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
-      ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}</td></tr>`;
+      ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
+      ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}
+      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Enter this leg again">Re-${t.side === "BUY" ? "buy" : "sell"}</button>` : ""}</td></tr>`;
   }).join("");
   const cls = s.combined_pnl >= 0 ? "pos" : "neg";
   const failedLegs = s.failed_legs || [];
@@ -967,6 +996,40 @@ async function exitLeg(tid) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
+// Add lots to a running leg, or re-enter a closed one: same contract and side, a new leg of this strategy.
+async function addLeg(tid, reenter) {
+  try {
+    const t = (await api(`/api/trades/${tid}`)).trade;
+    const tick = Number(t.tick_size) || 0.05;
+    const ltp = t.kite_ltp ?? t.last_ltp;
+    const px = ltp != null ? toTick(Number(ltp), tick) : toTick(Number(t.entry_avg_price ?? t.entry_price), tick);
+    const ref = Number(t.entry_avg_price ?? t.entry_price);
+    // adding: same SL / target as the running leg; re-entering: same distances as last time, from today's price
+    const sl = reenter ? toTick(px - (ref - Number(t.initial_sl)), tick) : t.current_sl;
+    const tp = t.target == null ? "" : reenter ? toTick(px + (Number(t.target) - ref), tick) : t.target;
+    const what = reenter ? `Re-${t.side === "BUY" ? "buy" : "sell"}` : "Add to";
+    const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
+      <p class="hint small">LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · lot size ${t.lot_size}${reenter ? "" :
+        ` · running ${Math.floor(t.open_qty / t.lot_size)} lot(s) @ ${num(ref)}`}. Placed as a new leg of this strategy with its own SL / target.</p>
+      <div class="edit-leg-grid">
+        <label>Lots <input id="add-lots" type="number" min="1" step="1" value="${reenter ? t.lots : 1}"></label>
+        <label>Order <select id="add-type"><option value="LIMIT">Limit</option><option value="MARKET">Market</option></select></label>
+        <label>Price ₹ <input id="add-price" type="number" step="any" min="0" value="${px}"></label>
+        <label>Stop-loss ₹ (blank = auto) <input id="add-sl" type="number" step="any" min="0" value="${sl ?? ""}"></label>
+        <label>Target ₹ (blank = none) <input id="add-tp" type="number" step="any" min="0" value="${tp}"></label>
+      </div>`;
+    const pending = dialog(`${what} leg`, html, MODE === "LIVE");
+    $("#add-type").onchange = () => { $("#add-price").disabled = $("#add-type").value === "MARKET"; };
+    if (!(await pending)) return;
+    const n = (id) => ($(id).value === "" ? null : toTick(Number($(id).value), tick));
+    const r = await api(`/api/strategies/legs/${tid}/add`, {
+      lots: Math.floor(Number($("#add-lots").value)) || 0, price_type: $("#add-type").value,
+      entry_price: n("#add-price"), stop_loss: n("#add-sl"), target: n("#add-tp")});
+    if (!r.ok) return alertBox(`${what} leg: not placed`, r.errors || []);
+    refreshStrategies();
+  } catch (e) { alertBox("Error", [e.message]); }
+}
+
 async function cancelLeg(tid) {
   try {
     const p = await api(`/api/trades/${tid}/prepare`, {action: "CANCEL"});
@@ -1018,6 +1081,10 @@ async function refreshLegLtp(tid) {
 $("#strategies-list").addEventListener("click", async (ev) => {
   const id = ev.target.dataset.exit;
   if (id) return exitStrategy(Number(id));
+  const aid = ev.target.dataset.legAdd;
+  if (aid) return addLeg(Number(aid), false);
+  const rid = ev.target.dataset.legReenter;
+  if (rid) return addLeg(Number(rid), true);
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
   const cid = ev.target.dataset.legCancel;

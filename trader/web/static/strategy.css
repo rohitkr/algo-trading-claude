@@ -204,6 +204,8 @@ button.danger { background: var(--sell); color: #fff; border-color: var(--sell);
 .leg-actions { display: flex; gap: 4px; }
 .edit-btn { background: var(--buy-blue); color: #fff; border-color: var(--buy-blue); font-weight: 600; }
 .edit-btn:hover { filter: brightness(1.1); }
+.add-btn { background: transparent; color: var(--buy); border-color: var(--buy); font-weight: 600; }   /* quiet: Edit / Exit stay the bold ones */
+.add-btn:hover { background: var(--buy); color: #fff; }
 .edit-leg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .status-pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.2); }
 .status-pill.ACTIVE { background: var(--accent); color: #fff; }
@@ -246,12 +248,16 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 .history-pager [data-h="info"] { min-width: 11ch; text-align: center; font-variant-numeric: tabular-nums; }
 .hidden { display: none !important; }
 /* strategy legs: fixed layout, so column widths never depend on the (ticking) contents */
-.strategy-card table.legs-live { table-layout: fixed; width: 100%; min-width: 820px; }
-.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 18%; } .legs-live .c-qty { width: 8%; }
-.legs-live .c-px { width: 8%; } .legs-live .c-pnl { width: 11%; } .legs-live .c-status { width: 12%; }
-.legs-live .c-act { width: 17%; }
+.strategy-card table.legs-live { table-layout: fixed; width: 100%; min-width: 880px; }
+.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 16%; } .legs-live .c-qty { width: 8%; }
+.legs-live .c-px { width: 7%; } .legs-live .c-pnl { width: 9%; } .legs-live .c-status { width: 11%; }
+.legs-live .c-act { width: 23%; }   /* Edit + Add + Exit fit without scrolling */
+.legs-live td.leg-actions button { padding-left: 10px; padding-right: 10px; }
 /* one line per leg whatever its state: buttons and status never wrap (full status on hover) */
 .legs-live td.leg-actions { white-space: nowrap; }
 .legs-live td:nth-child(9) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legs-live td.sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .edit-ref { margin: 0 0 10px; font-variant-numeric: tabular-nums; }
+
+/* stop-loss / target price on the wrong side of the entry (see wrongSide() in strategy.js) */
+.slp-cell input.bad { border-color: var(--sell); box-shadow: 0 0 0 1px var(--sell); }

@@ -162,6 +162,20 @@ def wait_for_request_token(srv: _CallbackServer, timeout_s: float = 180.0,
     return srv.request_token
 
 
+def ipv4_adapter():
+    """A requests adapter whose connections leave from an IPv4 address only (2026-10-05: an order was refused with
+    "IP 2401:4900:... is not allowed to place orders for this app" when the Mac picked up a temporary IPv6 address).
+    Binding the source to 0.0.0.0 makes every IPv6 candidate fail to bind, so urllib3 moves on to the IPv4 one."""
+    from requests.adapters import HTTPAdapter
+
+    class IPv4Adapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            kwargs["source_address"] = ("0.0.0.0", 0)
+            super().init_poolmanager(*args, **kwargs)
+
+    return IPv4Adapter()
+
+
 def new_kite(cfg: ZerodhaConfig, access_token: str | None = None):
     """KiteConnect client. kiteconnect is imported lazily so the package imports without it."""
     try:
@@ -170,6 +184,8 @@ def new_kite(cfg: ZerodhaConfig, access_token: str | None = None):
         raise RuntimeError("pip install kiteconnect to talk to Zerodha") from exc
     cfg.require_api()
     kite = KiteConnect(api_key=cfg.api_key)
+    if cfg.ipv4_only:
+        kite.reqsession.mount("https://", ipv4_adapter())
     if access_token:
         kite.set_access_token(access_token)
     return kite

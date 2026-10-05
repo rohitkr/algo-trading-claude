@@ -16,6 +16,7 @@
 | KITE_MAX_REPRICES     | 3                         | Re-price attempts before giving up on a leg          |
 | KITE_MARGIN_BUFFER_PCT| 10                        | Need available >= required x (1 + buffer)            |
 | KITE_TAG              | algo                      | Order tag (max 20 chars)                             |
+| KITE_IPV4_ONLY        | 1                         | Talk to Kite over IPv4 only: Kite accepts orders only from the static IP registered on the developer console, and macOS sends from a rotating temporary IPv6 address whenever one exists |
 """
 from __future__ import annotations
 
@@ -77,6 +78,7 @@ class ZerodhaConfig:
     max_reprices: int = 3
     margin_buffer_pct: float = 10.0
     tag: str = "algo"
+    ipv4_only: bool = True
 
     def __post_init__(self):
         if self.product not in ("NRML", "MIS"):
@@ -109,6 +111,7 @@ class ZerodhaConfig:
             max_reprices=int(g("KITE_MAX_REPRICES", "3")),
             margin_buffer_pct=float(g("KITE_MARGIN_BUFFER_PCT", "10")),
             tag=g("KITE_TAG", "algo"),
+            ipv4_only=_bool(g("KITE_IPV4_ONLY", "1")),
         )
 
     def require_api(self, secret: bool = False) -> None:

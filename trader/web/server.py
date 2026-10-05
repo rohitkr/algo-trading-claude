@@ -203,6 +203,9 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                     return self._json(200, {"ok": True})
                 if u.path == "/api/strategies/trade_all":
                     return self._json(200, app.strategies.create_and_trade(body))
+                m = re.fullmatch(r"/api/strategies/legs/(\d+)/add", u.path)
+                if m:
+                    return self._json(200, app.strategies.add_to_leg(int(m.group(1)), body))
                 m = re.fullmatch(r"/api/strategies/(\d+)/exit", u.path)
                 if m:
                     return self._json(200, app.strategies.exit_all(int(m.group(1))))

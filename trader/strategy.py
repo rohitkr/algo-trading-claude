@@ -172,8 +172,11 @@ class StrategyService:
                                      sl_auto=bool(req.pop("sl_auto", False)))
                 if not p["ok"]:
                     errors += [f"leg {i} ({tag}): {e}" for e in p["errors"]]
+                    # a stop on the wrong side already explains itself: don't repeat it as "LTP through the stop"
+                    wrong_side = any("stop-loss" in e for e in p["errors"])
                     errors += [f"leg {i} ({tag}): {c['name']} ({c['detail']})"
-                               for c in (p.get("risk") or []) if not c["passed"]]
+                               for c in (p.get("risk") or [])
+                               if not c["passed"] and not (wrong_side and c["name"] == "ltp_not_through_stop")]
                     continue
                 previews.append((leg, p))
             if errors:
@@ -210,6 +213,52 @@ class StrategyService:
             self.svc.audit(None, "STRATEGY_CREATED", "WARNING" if failed else "INFO",
                            {"strategy_id": sid, "confirmed": confirmed, "failed": failed})
             return {"ok": bool(confirmed), "strategy_id": sid, "confirmed": confirmed, "failed": failed}
+
+    # -- add lots to a leg / re-enter a closed leg (a new leg in the same strategy) -----------------------
+    def add_to_leg(self, trade_id: int, payload: dict) -> dict:
+        """Place more of a leg's contract, same side, as a NEW leg of the same strategy (its own SL/target).
+        On a running leg this adds to the position; on a closed leg it re-enters it. A finished strategy is
+        reopened; its profit/loss/trail rules then count only P&L made after the re-entry."""
+        with self.svc.lock:
+            t = self.repo.trade(trade_id)
+            if t is None or t.get("group_id") is None:
+                raise ActionError(f"trade {trade_id} is not a strategy leg")
+            s = self.repo.strategy(t["group_id"])
+            cfg = GlobalConfig.from_json(json.loads(s["config"]))
+            now = self.svc.clock()
+            auto_exit = (cfg.square_off_time.strftime("%H:%M")
+                         if cfg.square_off_time and cfg.square_off_time > now.time() else None)
+            leg = dict(underlying=t["underlying"], expiry=t["expiry"], strike=t["strike"],
+                       option_type=t["option_type"], side=t["side"], lots=int(payload.get("lots") or 0),
+                       price_type=payload.get("price_type") or "LIMIT", entry_price=payload.get("entry_price"),
+                       sl_value=_num(payload.get("stop_loss")), sl_type="PRICE",
+                       tp_value=_num(payload.get("target")), tp_type="PRICE")
+            if leg["lots"] < 1:
+                return {"ok": False, "errors": ["lots must be 1 or more"]}
+            try:
+                req = self._leg_payload(leg, cfg, auto_exit)
+            except (KeyError, ValueError) as exc:
+                return {"ok": False, "errors": [str(exc)]}
+            p = self.svc.preview(req, group_id=s["id"], leg_role=t.get("leg_role"),
+                                 sl_auto=bool(req.pop("sl_auto", False)))
+            if not p["ok"]:
+                if p.get("trade_id"):
+                    self.repo.update_trade(p["trade_id"], group_id=None)    # not placed: keep it off the card
+                return {"ok": False, "errors": p["errors"] + [f"{c['name']}: {c['detail']}"
+                                                               for c in (p.get("risk") or []) if not c["passed"]]}
+            try:
+                self.svc.confirm(p["trade_id"], p["token"])
+            except ActionError as exc:
+                self._not_placed(p["trade_id"], f"not placed: {exc}")
+                return {"ok": False, "errors": [str(exc)], "trade_id": p["trade_id"]}
+            if s["status"] != "ACTIVE":
+                legs = self.repo.trades_by_group(s["id"])
+                booked = round(sum((x["realized_pnl"] or 0) for x in legs if x["status"] not in L.OPEN_STATUSES), 2)
+                self.repo.update_strategy(s["id"], status="ACTIVE", exit_reason=None, exit_time=None,
+                                          best_pnl=None, locked_pnl=None, pnl_base=booked)
+            self.svc.audit(p["trade_id"], "LEG_ADDED", "INFO",
+                           {"strategy_id": s["id"], "from_leg": trade_id, "reopened": s["status"] != "ACTIVE"})
+            return {"ok": True, "trade_id": p["trade_id"], "strategy_id": s["id"]}
 
     def _not_placed(self, trade_id: int, reason: str) -> None:
         """A READY leg that will never be sent: EXPIRED with the reason, kept on the strategy so it shows."""
@@ -287,7 +336,7 @@ class StrategyService:
                                       exit_time=self.repo.now())
             return
         combined = round(sum((t["realized_pnl"] or 0) for t in legs)
-                         + sum((t["unrealized_pnl"] or 0) for t in open_legs), 2)
+                         + sum((t["unrealized_pnl"] or 0) for t in open_legs) - (s.get("pnl_base") or 0), 2)
         reason = None
         if cfg.exit_profit_amount is not None and combined >= cfg.exit_profit_amount:
             reason = "STRATEGY_PROFIT_TARGET"

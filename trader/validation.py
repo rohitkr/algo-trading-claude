@@ -95,14 +95,18 @@ def validate(req: TradeRequest, lot_size: int, tick: float, now: datetime) -> li
     buy = req.side == "BUY"
     if buy:
         if req.stop_loss >= req.entry_price:
-            e.append(f"BUY: stop-loss ({req.stop_loss}) must be below the entry price ({req.entry_price})")
+            e.append(f"BUY: stop-loss ₹{req.stop_loss:g} must be BELOW the entry ₹{req.entry_price:g} "
+                     f"(you exit if the price falls)")
         if req.target is not None and req.target <= req.entry_price:
-            e.append(f"BUY: target ({req.target}) must be above the entry price ({req.entry_price})")
+            e.append(f"BUY: target ₹{req.target:g} must be ABOVE the entry ₹{req.entry_price:g}")
     elif req.side == "SELL":
         if req.stop_loss <= req.entry_price:
-            e.append(f"SELL: stop-loss ({req.stop_loss}) must be above the entry price ({req.entry_price})")
+            d = req.entry_price - req.stop_loss
+            e.append(f"SELL: stop-loss ₹{req.stop_loss:g} must be ABOVE the entry ₹{req.entry_price:g} "
+                     f"(a SELL loses when the price rises; {d:g} points of risk is a stop-loss of "
+                     f"₹{req.entry_price + d:g})")
         if req.target is not None and req.target >= req.entry_price:
-            e.append(f"SELL: target ({req.target}) must be below the entry price ({req.entry_price})")
+            e.append(f"SELL: target ₹{req.target:g} must be BELOW the entry ₹{req.entry_price:g}")
     if req.trail_enabled:
         if req.trail_type not in ("POINTS", "PERCENT"):
             e.append("trailing type must be POINTS or PERCENT")
