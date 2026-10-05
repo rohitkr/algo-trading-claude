@@ -44,6 +44,19 @@ class ActionError(RuntimeError):
     pass
 
 
+def _num_or_none(v):
+    try:
+        return None if v in (None, "") else float(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def _loss_at_stop(side: str, basis, stop, qty) -> float:
+    if basis is None or stop is None or not qty:
+        return 0.0
+    return max(0.0, (basis - stop) if side == "BUY" else (stop - basis)) * qty
+
+
 def _same(a, b) -> bool:
     if a in (None, "") and b in (None, ""):
         return True
@@ -123,7 +136,8 @@ class TradeService:
                          broker_net=snap.net_any_product(inst.exchange, inst.tradingsymbol) if snap else None,
                          halted=self.halted(), group_id=group_id)
 
-    def preview(self, payload: dict, group_id: int | None = None, leg_role: str | None = None) -> dict:
+    def preview(self, payload: dict, group_id: int | None = None, leg_role: str | None = None,
+                sl_auto: bool = False) -> dict:
         """Validate + risk-check a trade and store it (DRAFT -> READY). Places nothing. Returns a single-use
         confirm token when everything passes. group_id: the multi-leg strategy this leg belongs to (set by
         StrategyService only, never taken from the request body); the strategy counts as one position."""
@@ -161,7 +175,7 @@ class TradeService:
                 partial_enabled=int(req.partial_enabled), partial_lots=req.partial_lots if req.partial_enabled else None,
                 partial_qty=partial_qty, partial_price=req.partial_price if req.partial_enabled else None,
                 auto_exit_at=auto_exit_at.isoformat(timespec="seconds") if auto_exit_at else None,
-                group_id=group_id, leg_role=leg_role or None,
+                group_id=group_id, leg_role=leg_role or None, sl_auto=int(bool(sl_auto)),
                 status=L.DRAFT))
             self.audit(tid, "TRADE_CREATED", "INFO", {"request": payload, "tradingsymbol": inst.tradingsymbol,
                                                        "lot_size": inst.lot_size, "quantity": qty})
@@ -380,6 +394,20 @@ class TradeService:
                "partial_price": t["partial_price"],
                "auto_exit_time": t["auto_exit_at"][11:16] if t["auto_exit_at"] else ""}
         merged = {**cur, **{k: v for k, v in changes.items()}}
+        # A stop the app derived itself (leg created without a stop-loss: 95% of TRADER_MAX_LOSS_PER_TRADE from the
+        # entry) follows entry/lots edits, unless the user sets a stop explicitly. Without this, raising a pending
+        # entry's limit kept the old stop and pushed the loss-at-stop over the limit (2026-10-05, #105/#107/#108).
+        user_set_sl = "stop_loss" in changes and not _same(_num_or_none(changes["stop_loss"]), cur["stop_loss"])
+        if t.get("sl_auto") and not user_set_sl and ("entry_price" in changes or "lots" in changes):
+            try:
+                e_new, lots_new = float(merged["entry_price"]), int(merged["lots"])
+            except (TypeError, ValueError):
+                e_new, lots_new = None, None
+            if e_new and lots_new and lots_new > 0:
+                pts = (self.cfg.max_loss_per_trade * 0.95) / (lots_new * t["lot_size"])
+                raw = e_new - pts if t["side"] == "BUY" else e_new + pts
+                if raw > 0:
+                    merged["stop_loss"] = round_to_tick(raw, t["tick_size"], "SELL" if t["side"] == "BUY" else "BUY")
         try:
             req = TradeRequest.from_json({**merged, "underlying": t["underlying"], "expiry": t["expiry"],
                                           "strike": t["strike"], "option_type": t["option_type"], "side": t["side"],
@@ -440,12 +468,27 @@ class TradeService:
                 # a working entry is not re-checked against things that only apply to opening a new trade
                 risk = [c for c in risk if c.name not in ("ltp_not_through_stop",) or q["filled"] == 0]
             else:
-                basis = q["entry_avg"] or req.entry_price
-                qty = q["open"] if q["filled"] else req.lots * lot
-                loss = max(0.0, (basis - req.stop_loss) if t["side"] == "BUY" else (req.stop_loss - basis)) * qty
-                from .risk import RiskCheck
-                risk = [RiskCheck("max_loss_per_trade", loss <= self.cfg.max_loss_per_trade,
-                                  f"₹{loss:,.0f} at the new SL, limit ₹{self.cfg.max_loss_per_trade:,.0f}")]
+                risk = []
+            # Loss at the stop: an edit that keeps or LOWERS it is never blocked (tightening, breakeven, trailing,
+            # fixing a position that is already over the limit); only an edit that RAISES it beyond the limit is.
+            basis_new = req.entry_price if q["filled"] == 0 else (q["entry_avg"] or req.entry_price)
+            qty_new = req.lots * lot if q["filled"] == 0 else q["open"]
+            basis_cur = t["entry_price"] if q["filled"] == 0 else (q["entry_avg"] or t["entry_price"])
+            qty_cur = t["quantity"] if q["filled"] == 0 else q["open"]
+            loss_new = _loss_at_stop(t["side"], basis_new, req.stop_loss, qty_new)
+            loss_cur = _loss_at_stop(t["side"], basis_cur, t["current_sl"], qty_cur)
+            limit = self.cfg.max_loss_per_trade
+            ok = loss_new <= limit or loss_new <= loss_cur + 0.5
+            fit = (basis_new - limit / qty_new if t["side"] == "BUY" else basis_new + limit / qty_new) if qty_new else None
+            hint = ""
+            if not ok and fit is not None and fit > 0:
+                fit = round_to_tick(fit, tick, "BUY" if t["side"] == "BUY" else "SELL")
+                hint = (f"; use a stop-loss {'at or above' if t['side'] == 'BUY' else 'at or below'} ₹{fit:g}"
+                        " or fewer lots")
+            from .risk import RiskCheck
+            risk = [c for c in risk if c.name != "max_loss_per_trade"] + [RiskCheck(
+                "max_loss_per_trade", ok,
+                f"₹{loss_new:,.0f} at the stop, limit ₹{limit:,.0f} (was ₹{loss_cur:,.0f}){hint}")]
             errors += [f"{c.name}: {c.detail}" for c in risk if not c.passed]
         fields: dict = {}
         if "entry_price" in diff:
@@ -454,6 +497,8 @@ class TradeService:
             fields.update(lots=req.lots, quantity=req.lots * lot)
         if "stop_loss" in diff:
             fields.update(current_sl=req.stop_loss, user_sl=req.stop_loss, stop_breached_at=None)
+            if user_set_sl:
+                fields["sl_auto"] = 0                         # the user chose this stop: it no longer follows entry
             if q["filled"] == 0:
                 fields["initial_sl"] = req.stop_loss          # not started yet: this IS the initial SL
             if req.trail_enabled:

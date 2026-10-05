@@ -168,7 +168,8 @@ class StrategyService:
                     errors.append(f"leg {i} ({tag}): {exc}")
                     continue
                 # preview only STORES the leg (grouped); nothing is placed yet
-                p = self.svc.preview(req, group_id=sid, leg_role=str(leg.get("leg_role") or "") or None)
+                p = self.svc.preview(req, group_id=sid, leg_role=str(leg.get("leg_role") or "") or None,
+                                     sl_auto=bool(req.pop("sl_auto", False)))
                 if not p["ok"]:
                     errors += [f"leg {i} ({tag}): {e}" for e in p["errors"]]
                     errors += [f"leg {i} ({tag}): {c['name']} ({c['detail']})"
@@ -243,6 +244,7 @@ class StrategyService:
         qty = (leg.get("lots") or 1) * inst.lot_size
         stop_loss = _resolve_price(entry_price, side, "sl", _num(leg.get("sl_value")), str(leg.get("sl_type") or "POINTS").upper())
         target = _resolve_price(entry_price, side, "tp", _num(leg.get("tp_value")), str(leg.get("tp_type") or "POINTS").upper())
+        sl_auto = stop_loss is None
         if stop_loss is None:
             # No per-leg stop was given: the strategy's own combined profit/loss exit covers this leg
             # instead. The engine still needs SOME numeric stop_loss (every trade has one), so one is set
@@ -261,7 +263,7 @@ class StrategyService:
                    option_type=leg.get("option_type"), side=side, lots=leg.get("lots") or 1,
                    entry_price=entry_price, stop_loss=stop_loss, target=target,
                    product=_product_for(cfg.order_type), order_type=cfg.order_type,
-                   auto_exit_time=auto_exit, price_type=price_type)
+                   auto_exit_time=auto_exit, price_type=price_type, sl_auto=sl_auto)
 
     # -- per-tick monitoring: combined P&L rules only, nothing per-leg is touched except as noted -------
     def tick(self, now: datetime) -> None:
