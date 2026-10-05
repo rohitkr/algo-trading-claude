@@ -293,8 +293,13 @@ function legRow(leg) {
 }
 
 function renderLegs() {
+  // Re-rendering replaces every input, so keep the focused one focused: each ↑/↓ on a number box fires
+  // "change" and re-renders, which used to drop focus after the first key press.
+  const a = document.activeElement, row = a?.closest?.("#leg-tbody tr[data-id]");
+  const keep = row && a.dataset.f ? {id: row.dataset.id, f: a.dataset.f} : null;
   $("#leg-tbody").innerHTML = LEGS.map(legRow).join("") ||
     `<tr><td colspan="11" class="hint small">No legs yet - add one or pick a template above.</td></tr>`;
+  if (keep) $(`#leg-tbody tr[data-id="${keep.id}"] [data-f="${keep.f}"]`)?.focus();
   renderSummaries();
   renderCalc();
   renderPayoff();

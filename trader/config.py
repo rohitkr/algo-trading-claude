@@ -44,6 +44,7 @@ Safety: TRADER_MODE defaults to PAPER (simulated exchange, no Zerodha orders). A
 | TRADER_LOT_UNITS_<NAME>           | CRUDEOIL 100, CRUDEOILM 10, GOLDM 10 | units per MCX lot (Kite quantities are in lots; P&L needs units) |
 | TRADER_MAX_ENTRY_DEVIATION_PCT    | 20                         | entry limit vs Breeze LTP (fat-finger guard; 0 = off)    |
 | TRADER_REQUIRE_LTP_FOR_ENTRY      | true                       | refuse entries when no Breeze price is available         |
+| TRADER_ALLOW_ADD_TO_SYMBOL        | true                       | allow a 2nd trade (same side) in a symbol already held; opposite side is always refused |
 | TRADER_FREEZE_QTY_<UNDERLYING>    | NIFTY 1800, BANKNIFTY 900, FINNIFTY 1800, SENSEX 1000 | orders above this are refused (no slicing) |
 | TRADER_CONFIRM_TOKEN_SECONDS      | 120                        | a preview/confirm token expires after this               |
 | **Paper**                         |                            |                                                          |
@@ -145,6 +146,7 @@ class TraderConfig:
         limit, or ₹10,000 when that limit is off."""
         return self.max_loss_per_trade or 10_000.0
     require_ltp_for_entry: bool = True
+    allow_add_to_symbol: bool = True       # TRADER_ALLOW_ADD_TO_SYMBOL: a 2nd trade (same side) in a held symbol
     freeze_qty: dict = field(default_factory=lambda: dict(DEFAULT_FREEZE))
     confirm_token_s: float = 120.0
     # paper
@@ -230,6 +232,7 @@ class TraderConfig:
             square_off_time=times["TRADER_SQUARE_OFF_TIME"],
             max_entry_deviation_pct=float(g("TRADER_MAX_ENTRY_DEVIATION_PCT", d.max_entry_deviation_pct)),
             require_ltp_for_entry=_bool(g("TRADER_REQUIRE_LTP_FOR_ENTRY", "true")),
+            allow_add_to_symbol=_bool(g("TRADER_ALLOW_ADD_TO_SYMBOL", "true")),
             freeze_qty=freeze,
             mcx_trading_start=times["TRADER_MCX_TRADING_START"],
             mcx_trading_end=times["TRADER_MCX_TRADING_END"],

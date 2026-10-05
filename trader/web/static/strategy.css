@@ -137,11 +137,9 @@ table.leg-table { width: 100%; border-collapse: collapse; min-width: 780px; }
 .leg-table .lots-cell input { width: 48px; }
 /* The strike/+- and lots fields have their own controls, so the browser's native up/down spinner is
    redundant clutter - hide it on hover for just these two number inputs. */
-.leg-table .strike-cell input::-webkit-inner-spin-button, .leg-table .strike-cell input::-webkit-outer-spin-button,
-.leg-table .lots-cell input::-webkit-inner-spin-button, .leg-table .lots-cell input::-webkit-outer-spin-button {
-  -webkit-appearance: none; margin: 0;
-}
-.leg-table .strike-cell input, .leg-table .lots-cell input { -moz-appearance: textfield; }
+/* No spinner arrows on any number box (hover/focus); the ↑/↓ keys still step the value. */
+input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .drag-handle { cursor: grab; color: var(--muted); text-align: center; width: 18px; user-select: none; }
 .drag-handle:active { cursor: grabbing; }
 .leg-table tr.dragging, table.order-confirm tr.dragging { opacity: .4; }

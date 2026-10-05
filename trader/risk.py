@@ -84,8 +84,17 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
     if cfg.max_daily_profit:
         add("max_daily_profit", day_pnl < cfg.max_daily_profit,
             f"today ₹{day_pnl:,.0f}, cap ₹{cfg.max_daily_profit:,.0f}")
+    # Adding lots to a symbol you already hold is allowed (a separate trade with its own SL/target); only the
+    # OPPOSITE side is refused: Zerodha nets BUY and SELL of one symbol into one position, so the two trades
+    # could not be told apart.
     mine = [x["id"] for x in open_trades if x["tradingsymbol"] == tradingsymbol and x["status"] in L.OPEN_STATUSES]
-    add("one_trade_per_symbol", not mine, f"trade(s) {mine} already hold/work {tradingsymbol}" if mine else "")
+    against = [x["id"] for x in open_trades if x["tradingsymbol"] == tradingsymbol and x["status"] in L.OPEN_STATUSES
+               and x["side"] != side]
+    add("no_opposite_trade_in_symbol", not against,
+        f"trade(s) {against} hold the opposite side of {tradingsymbol}: exit those first" if against else "")
+    if not cfg.allow_add_to_symbol:
+        add("one_trade_per_symbol", not mine,
+            f"trade(s) {mine} already hold/work {tradingsymbol} (TRADER_ALLOW_ADD_TO_SYMBOL=false)" if mine else "")
     if broker_net is None:
         add("broker_position_known", False, "could not read Zerodha positions")
     else:

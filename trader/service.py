@@ -775,7 +775,7 @@ class TradeService:
     # -- reconciliation ---------------------------------------------------------------------------------
     def _reconcile(self, t: dict, q: dict, snap: Snapshot, now: datetime) -> str:
         expected = L.direction(t["side"]) * q["open"]
-        actual = snap.net(t["exchange"], t["tradingsymbol"], t["product"])
+        actual = self._broker_share(t, q, snap)
         if actual == expected:
             if t["mismatch_count"]:
                 self.audit(t["id"], "RECONCILED", "INFO", {"expected": expected, "actual": actual,
@@ -810,6 +810,27 @@ class TradeService:
                          error=f"Zerodha shows {actual}, expected {expected}")
         return "stop"
 
+    def _broker_share(self, t: dict, q: dict, snap: Snapshot) -> int:
+        """This trade's part of Zerodha's net position. Several trades can hold the same symbol (lots added later,
+        same side only): Zerodha shows one net quantity, which is shared out oldest trade first, each up to its
+        own open quantity; the newest takes the rest, so a position added outside still shows up as a mismatch
+        and a quantity closed in Kite is taken off the newest trade first."""
+        net = snap.net(t["exchange"], t["tradingsymbol"], t["product"])
+        same = [x for x in self.repo.trades(L.OPEN_STATUSES)
+                if x["id"] != t["id"] and x["exchange"] == t["exchange"] and x["tradingsymbol"] == t["tradingsymbol"]
+                and x["product"] == t["product"] and x["side"] == t["side"]]
+        if not same:
+            return net
+        d = L.direction(t["side"])
+        left = net * d
+        for x in sorted(same, key=lambda x: x["id"]):
+            if x["id"] > t["id"]:
+                break
+            left -= min(max(left, 0), self._derive(x)["open"])
+        if any(x["id"] > t["id"] for x in same):              # not the newest: at most its own open quantity
+            left = min(max(left, 0), q["open"])
+        return left * d
+
     def _manual_exit(self, t: dict, q: dict, now: datetime, info: dict) -> None:
         # Cancel OUR resting orders (a leftover SL would open a new position), place nothing else.
         cancelled = []
@@ -835,7 +856,7 @@ class TradeService:
         if q["uncertain"]:
             return
         expected = L.direction(t["side"]) * q["open"]
-        actual = snap.net(t["exchange"], t["tradingsymbol"], t["product"])
+        actual = self._broker_share(t, q, snap)
         working = [o for o in q["orders"] if is_working(o["status"])]
         if actual == expected and q["open"] > 0 and t["status"] == L.UNKNOWN:
             self._transition(t, L.POSITION_ACTIVE, "RECONCILED_RESUMED", "WARNING",
