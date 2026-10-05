@@ -703,8 +703,34 @@ function dialog(title, html, live = false) {
   $("#dlg-title").textContent = title;
   $("#dlg-body").innerHTML = html;
   $("#dlg-live").classList.toggle("hidden", !live);
-  $("#dlg-ok").classList.remove("hidden");
+  okButton("Confirm");
   return new Promise((resolve) => { d.onclose = () => resolve(d.returnValue === "ok"); d.returnValue = ""; d.showModal(); });
+}
+// The dialog's OK button: "Buy" / "Sell" (coloured by side) for an order, "Confirm" otherwise.
+function okButton(text, side) {
+  const b = $("#dlg-ok");
+  b.classList.remove("hidden", "ok-buy", "ok-sell");
+  b.textContent = text;
+  if (side) b.classList.add(side === "BUY" ? "ok-buy" : "ok-sell");
+}
+// ↻ next to a price box: fills it with the contract's live price (a fresh fetch, not the cached one).
+const ltpBtn = (target) => `<button type="button" class="ltp-fill" data-ltp-for="${target}" title="Fill the live price (LTP)">↻</button>`;
+function wireLtpFill(t) {
+  $$("#dlg-body .ltp-fill").forEach((b) => {
+    b.onclick = async (ev) => {
+      ev.preventDefault();
+      b.disabled = true;
+      try {
+        const c = await api(`/api/contract?ltp=1&force=1&underlying=${encodeURIComponent(t.underlying)}&expiry=${t.expiry}&strike=${t.strike}&option_type=${t.option_type}`);
+        if (c.ltp == null) throw new Error(c.price_error || "no live price");
+        const box = $(b.dataset.ltpFor);
+        box.value = toTick(Number(c.ltp), Number(t.tick_size) || 0.05);
+        box.dispatchEvent(new Event("input", {bubbles: true}));
+        box.focus();
+      } catch (e) { b.title = `No price: ${e.message}`; }
+      finally { b.disabled = false; }
+    };
+  });
 }
 function alertBox(title, lines) { dialog(title, `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`); $("#dlg-ok").classList.add("hidden"); }
 
@@ -717,7 +743,9 @@ function confirmOrders(active) {
   const d = $("#dlg");
   $("#dlg-title").textContent = `Place ${rows.length} order(s)`;
   $("#dlg-live").classList.toggle("hidden", MODE !== "LIVE");
-  $("#dlg-ok").classList.remove("hidden");
+  const sides = new Set(rows.map((r) => r.leg.side));
+  if (sides.size === 1) { const sd = [...sides][0]; okButton(sd === "BUY" ? "Buy" : "Sell", sd); }
+  else okButton("Place orders");
   const draw = () => {
     const sellFirst = rows.findIndex((r) => r.leg.side === "SELL") < rows.map((r) => r.leg.side).lastIndexOf("BUY") &&
       rows.some((r) => r.leg.side === "SELL");
@@ -859,7 +887,7 @@ function strategyCard(s) {
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}
-      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Enter this leg again">Re-${t.side === "BUY" ? "buy" : "sell"}</button>` : ""}</td></tr>`;
+      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Buy or sell this contract again">Re-enter</button>` : ""}</td></tr>`;
   }).join("");
   const cls = s.combined_pnl >= 0 ? "pos" : "neg";
   const failedLegs = s.failed_legs || [];
@@ -939,7 +967,7 @@ async function editLeg(tid) {
         LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · current SL <b>${num(t.current_sl)}</b> ·
         target <b>${t.target != null ? num(t.target) : "none"}</b></p>
       <div id="leg-edit-form" class="edit-leg-grid">
-      ${entryOpen ? f("entry_price", "Entry limit ₹", t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
+      ${entryOpen ? f("entry_price", `<span>Entry limit ₹ ${ltpBtn("#leg-edit-form input[name=entry_price]")}</span>`, t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
       <label>Stop-loss <span class="slp-cell">
         <input id="edit-sl-value" type="number" step="any" min="0" value="${shown("sl", t.current_sl, slMode)}">
         <select id="edit-sl-type" data-prev="${slMode}">${typeOpts("sl", slMode)}</select>
@@ -950,6 +978,7 @@ async function editLeg(tid) {
       </span></label>
     </div>`;
     const pending = dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html);
+    wireLtpFill(t);
     for (const kind of ["sl", "tp"]) {
       const sel = $(`#edit-${kind}-type`), box = $(`#edit-${kind}-value`);
       sel.onchange = () => {
@@ -996,7 +1025,8 @@ async function exitLeg(tid) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
-// Add lots to a running leg, or re-enter a closed one: same contract and side, a new leg of this strategy.
+// Add lots to a running leg, or re-enter a closed one: same contract, a new leg of this strategy. Re-entering
+// can be either side (toggle at the top); adding to a running leg is always its own side.
 async function addLeg(tid, reenter) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
@@ -1007,25 +1037,49 @@ async function addLeg(tid, reenter) {
     // adding: same SL / target as the running leg; re-entering: same distances as last time, from today's price
     const sl = reenter ? toTick(px - (ref - Number(t.initial_sl)), tick) : t.current_sl;
     const tp = t.target == null ? "" : reenter ? toTick(px + (Number(t.target) - ref), tick) : t.target;
-    const what = reenter ? `Re-${t.side === "BUY" ? "buy" : "sell"}` : "Add to";
-    const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
+    let side = t.side;
+    const toggle = reenter ? `<div class="side-toggle" role="radiogroup" aria-label="Side">
+        <button type="button" data-side="BUY" class="BUY">Buy</button><button type="button" data-side="SELL" class="SELL">Sell</button></div>` : "";
+    const html = `${toggle}<div class="big-side ${esc(t.side)}" id="add-head">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
       <p class="hint small">LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · lot size ${t.lot_size}${reenter ? "" :
         ` · running ${Math.floor(t.open_qty / t.lot_size)} lot(s) @ ${num(ref)}`}. Placed as a new leg of this strategy with its own SL / target.</p>
       <div class="edit-leg-grid">
         <label>Lots <input id="add-lots" type="number" min="1" step="1" value="${reenter ? t.lots : 1}"></label>
         <label>Order <select id="add-type"><option value="LIMIT">Limit</option><option value="MARKET">Market</option></select></label>
-        <label>Price ₹ <input id="add-price" type="number" step="any" min="0" value="${px}"></label>
+        <label><span>Price ₹ ${ltpBtn("#add-price")}</span> <input id="add-price" type="number" step="any" min="0" value="${px}"></label>
         <label>Stop-loss ₹ (blank = auto) <input id="add-sl" type="number" step="any" min="0" value="${sl ?? ""}"></label>
         <label>Target ₹ (blank = none) <input id="add-tp" type="number" step="any" min="0" value="${tp}"></label>
       </div>`;
-    const pending = dialog(`${what} leg`, html, MODE === "LIVE");
+    const pending = dialog(reenter ? "Re-enter leg" : "Add to leg", html, MODE === "LIVE");
+    const show = () => {
+      $("#add-head").className = `big-side ${side}`;
+      $("#add-head").textContent = `${side} ${t.tradingsymbol}`;
+      $$(".side-toggle button").forEach((b) => b.classList.toggle("on", b.dataset.side === side));
+      okButton(side === "BUY" ? "Buy" : "Sell", side);
+    };
+    $$(".side-toggle button").forEach((b) => {
+      b.onclick = () => {
+        if (b.dataset.side === side) return;
+        side = b.dataset.side;
+        // a stop-loss / target is on the other side of the price for the other side: mirror them, same distance
+        const p = Number($("#add-price").value);
+        for (const id of ["#add-sl", "#add-tp"]) {
+          const v = $(id).value;
+          if (v !== "" && p > 0) { const m = toTick(2 * p - Number(v), tick); $(id).value = m > 0 ? m : ""; }
+        }
+        show();
+      };
+    });
+    show();
+    wireLtpFill(t);
     $("#add-type").onchange = () => { $("#add-price").disabled = $("#add-type").value === "MARKET"; };
     if (!(await pending)) return;
     const n = (id) => ($(id).value === "" ? null : toTick(Number($(id).value), tick));
+    const what = `${side === "BUY" ? "Buy" : "Sell"} ${t.tradingsymbol}`;
     const r = await api(`/api/strategies/legs/${tid}/add`, {
-      lots: Math.floor(Number($("#add-lots").value)) || 0, price_type: $("#add-type").value,
+      side, lots: Math.floor(Number($("#add-lots").value)) || 0, price_type: $("#add-type").value,
       entry_price: n("#add-price"), stop_loss: n("#add-sl"), target: n("#add-tp")});
-    if (!r.ok) return alertBox(`${what} leg: not placed`, r.errors || []);
+    if (!r.ok) return alertBox(`${what}: not placed`, r.errors || []);
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
 }
@@ -1046,8 +1100,23 @@ async function cancelLeg(tid) {
 // Running strategies are always listed first; finished ones are history, filtered by date and paged.
 let STRATEGIES = [];
 const STRAT_FILTER = HistoryFilter.create($("#strategies-filter"), "strategies", () => renderStrategies());
+// Period P&L next to the heading: every strategy in the selected period (all pages, not just this one) plus the
+// running ones shown on top; follows pushed P&L between dashboard refreshes.
+let SHOWN = [];
+function renderPeriodTotal() {
+  const sum = SHOWN.reduce((a, s) => a + (Number(s.combined_pnl) || 0), 0);
+  const tot = $("#strategies-total");
+  tot.textContent = SHOWN.length ? `P&L ${money(sum)}` : "";
+  tot.className = `period-total ${sum > 0 ? "pos" : sum < 0 ? "neg" : ""}`;
+}
+Live.onStrategy((id, v) => {
+  const s = STRATEGIES.find((x) => x.id === id);
+  if (s && v != null) { s.combined_pnl = v; renderPeriodTotal(); }
+});
 function renderStrategies() {
-  const {pinned, page, total} = STRAT_FILTER.apply(STRATEGIES, (s) => s.created_at, (s) => s.status === "ACTIVE");
+  const {pinned, page, total, shown} = STRAT_FILTER.apply(STRATEGIES, (s) => s.created_at, (s) => s.status === "ACTIVE");
+  SHOWN = shown;
+  renderPeriodTotal();
   const html = [...pinned, ...page].map(strategyCard).join("") ||
     `<p class="hint small">${total || STRATEGIES.length ? "No finished strategies in this date range." : "No strategies yet."}</p>`;
   const list = $("#strategies-list");

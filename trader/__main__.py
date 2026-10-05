@@ -75,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     app.hub.start()
     mon.start()
     banner = "LIVE TRADING - REAL ORDERS" if cfg.live else "PAPER (simulated exchange)"
-    print(f"\n  {banner}\n  Open http://127.0.0.1:{port}  (Ctrl-C stops; resting SL orders stay at Zerodha)\n")
+    names = "".join(f" or http://{n}:{port}" for n in cfg.hostnames)
+    print(f"\n  {banner}\n  Open http://127.0.0.1:{port}{names}  (Ctrl-C stops; resting SL orders stay at Zerodha)\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

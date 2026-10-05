@@ -195,7 +195,9 @@ form.addEventListener("submit", async (ev) => {
       alertBox("Trade not allowed", [...(r.errors || []), ...failed]);
       return;
     }
-    const ok = await dialog(`Place ${r.summary.side} order?`, summaryHtml(r.summary, r.risk), MODE === "LIVE");
+    const pending = dialog(`Place ${r.summary.side} order?`, summaryHtml(r.summary, r.risk), MODE === "LIVE");
+    okButton(r.summary.side === "BUY" ? "Buy" : "Sell", r.summary.side);
+    const ok = await pending;
     if (!ok) return;
     const c = await api(`/api/trades/${r.trade_id}/confirm`, {token: r.token});
     toast(`Trade #${r.trade_id}: entry order ${c.order_status}`);
@@ -227,11 +229,18 @@ function dialog(title, html, live = false) {
   $("#dlg-title").textContent = title;
   $("#dlg-body").innerHTML = html;
   $("#dlg-live").classList.toggle("hidden", !live);      // "LIVE order: real money" notice, no typing
-  $("#dlg-ok").classList.remove("hidden");
+  okButton("Confirm");
   return new Promise((resolve) => {
     d.onclose = () => resolve(d.returnValue === "ok");
     d.returnValue = ""; d.showModal();
   });
+}
+// The dialog's OK button: "Buy" / "Sell" (coloured by side) for an order, "Confirm" otherwise.
+function okButton(text, side) {
+  const b = $("#dlg-ok");
+  b.classList.remove("hidden", "ok-buy", "ok-sell");
+  b.textContent = text;
+  if (side) b.classList.add(side === "BUY" ? "ok-buy" : "ok-sell");
 }
 function alertBox(title, lines) {
   dialog(title, `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`);
@@ -290,7 +299,7 @@ async function editFlow(tid) {
     `<label>${label} <input name="${name}" ${attrs} value="${val ?? ""}"></label>`;
   // NOT a <form>: the dialog is already a <form>, and browsers silently drop a nested one.
   const html = `<div id="edit-form" class="grid">
-    ${entryOpen ? f("entry_price", "Entry limit ₹", t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
+    ${entryOpen ? f("entry_price", `<span>Entry limit ₹ <button type="button" class="ltp-fill" title="Fill the live price (LTP)">↻</button></span>`, t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
     ${f("stop_loss", "Stop-loss ₹", t.current_sl)}${f("target", "Target ₹ (blank = none)", t.target)}
     <label>Trailing <select name="trail_enabled"><option value="false">off</option><option value="true" ${t.trail_enabled ? "selected" : ""}>on</option></select></label>
     <label>Trail type <select name="trail_type"><option ${t.trail_type === "POINTS" ? "selected" : ""}>POINTS</option><option ${t.trail_type === "PERCENT" ? "selected" : ""}>PERCENT</option></select></label>
@@ -299,7 +308,21 @@ async function editFlow(tid) {
       ${f("partial_lots", "Partial lots", t.partial_lots, 'type="number" step="1" min="1"')}${f("partial_price", "Partial at ₹", t.partial_price)}`}
     ${f("auto_exit_time", "Auto-exit time", t.auto_exit_at ? t.auto_exit_at.slice(11, 16) : "", 'type="time"')}
   </div>`;
-  const go = await dialog(`Edit trade #${tid}: ${t.side} ${t.tradingsymbol}`, html);
+  const pendingEdit = dialog(`Edit trade #${tid}: ${t.side} ${t.tradingsymbol}`, html);
+  const fill = $("#edit-form .ltp-fill");            // ↻: the contract's live price into the entry limit
+  if (fill) fill.onclick = async (ev) => {
+    ev.preventDefault();
+    fill.disabled = true;
+    try {
+      const c = await api(`/api/contract?ltp=1&force=1&underlying=${encodeURIComponent(t.underlying)}&expiry=${t.expiry}&strike=${t.strike}&option_type=${t.option_type}`);
+      if (c.ltp == null) throw new Error(c.price_error || "no live price");
+      const tick = Number(t.tick_size) || 0.05, box = $("#edit-form input[name=entry_price]");
+      box.value = (Math.round(Number(c.ltp) / tick) * tick).toFixed(2);
+      box.focus();
+    } catch (e) { fill.title = `No price: ${e.message}`; }
+    finally { fill.disabled = false; }
+  };
+  const go = await pendingEdit;
   if (!go) return;
   const box = $("#edit-form");
   if (!box) throw new Error("edit form not found");

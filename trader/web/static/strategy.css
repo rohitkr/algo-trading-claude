@@ -261,3 +261,18 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 
 /* stop-loss / target price on the wrong side of the entry (see wrongSide() in strategy.js) */
 .slp-cell input.bad { border-color: var(--sell); box-shadow: 0 0 0 1px var(--sell); }
+
+/* Buy / Sell toggle at the top of the re-enter dialog; OK button labelled and coloured by side */
+.side-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+.side-toggle button { border: 0; border-radius: 0; background: transparent; color: var(--muted); font-weight: 600; padding: 6px 18px; }
+.side-toggle button.BUY.on { background: var(--buy); color: #fff; }
+.side-toggle button.SELL.on { background: var(--sell); color: #fff; }
+#dlg-ok.ok-buy { background: var(--buy); border-color: var(--buy); color: #fff; }
+#dlg-ok.ok-sell { background: var(--sell); border-color: var(--sell); color: #fff; }
+/* ↻ live-price button next to a price label */
+.ltp-fill { padding: 0 6px; margin-left: 4px; line-height: 1.4; font-size: 12px; background: transparent; color: var(--accent); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.ltp-fill:disabled { opacity: .5; }
+
+/* period P&L next to the Strategies heading */
+.period-total { margin-left: 12px; font-size: 15px; font-variant-numeric: tabular-nums; }
+.period-total.pos { color: var(--buy); } .period-total.neg { color: var(--sell); }

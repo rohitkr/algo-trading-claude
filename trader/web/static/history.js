@@ -74,7 +74,8 @@ window.HistoryFilter = (() => {
         q("info").textContent = hist.length ? `${start + 1}–${Math.min(start + st.size, hist.length)} of ${hist.length}` : "0 of 0";
         q("prev").disabled = st.page <= 1;
         q("next").disabled = st.page >= pages;
-        return {pinned: keep, page: hist.slice(start, start + st.size), total: hist.length};
+        // shown = everything in the selected period (pinned + every page), e.g. for a period P&L total
+        return {pinned: keep, page: hist.slice(start, start + st.size), total: hist.length, shown: [...keep, ...hist]};
       },
     };
   }

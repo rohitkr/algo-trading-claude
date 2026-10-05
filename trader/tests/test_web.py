@@ -180,3 +180,12 @@ def test_ui_has_no_nested_form_in_dialog_and_no_typed_live():
     html = (Path(__file__).parents[1] / "web" / "static" / "index.html").read_text()
     assert '<form id="edit-form"' not in js and '<div id="edit-form"' in js
     assert "dlg-live-input" not in js and "dlg-live-input" not in html
+
+
+def test_ui_answers_to_a_localhost_name_but_not_other_hosts(web):
+    r, base = web
+    port = base.rsplit(":", 1)[1]
+    assert call(base, "/api/dashboard", headers={"Host": f"algotrade.localhost:{port}"})[0] == 200
+    assert call(base, "/api/dashboard", headers={"Host": f"algo.local:{port}"})[0] == 200       # default name
+    assert call(base, "/api/dashboard", headers={"Host": f"algotrade.com:{port}"})[0] == 403   # not configured
+    assert call(base, "/api/dashboard", headers={"Host": f"evil.localhost.example:{port}"})[0] == 403

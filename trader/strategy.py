@@ -228,8 +228,12 @@ class StrategyService:
             now = self.svc.clock()
             auto_exit = (cfg.square_off_time.strftime("%H:%M")
                          if cfg.square_off_time and cfg.square_off_time > now.time() else None)
+            # re-entering a closed leg may take either side; adding to a running leg is always its own side
+            side = str(payload.get("side") or t["side"]).upper()
+            if side != t["side"] and t["status"] in L.OPEN_STATUSES:
+                return {"ok": False, "errors": [f"this leg is open as {t['side']}: exit it, or add as {t['side']}"]}
             leg = dict(underlying=t["underlying"], expiry=t["expiry"], strike=t["strike"],
-                       option_type=t["option_type"], side=t["side"], lots=int(payload.get("lots") or 0),
+                       option_type=t["option_type"], side=side, lots=int(payload.get("lots") or 0),
                        price_type=payload.get("price_type") or "LIMIT", entry_price=payload.get("entry_price"),
                        sl_value=_num(payload.get("stop_loss")), sl_type="PRICE",
                        tp_value=_num(payload.get("target")), tp_type="PRICE")

@@ -29,7 +29,11 @@ HOST = "127.0.0.1"
 
 
 def make_server(app, port: int) -> ThreadingHTTPServer:
-    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    # Host header allow-list (DNS-rebinding guard). Also answers to any *.localhost name (browsers never resolve
+    # those outside this machine), e.g. http://algotrade.localhost:8765, and to names in TRADER_HOSTNAMES.
+    names = ("127.0.0.1", "localhost", *getattr(app.cfg, "hostnames", ()))
+    allowed_hosts = {f"{n}:{port}" for n in names}
+    localhost_name = re.compile(rf"[a-z0-9-]+(\.[a-z0-9-]+)*\.localhost:{port}")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "trader"
@@ -52,7 +56,8 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             self._send(code, json.dumps(obj, default=str).encode(), "application/json")
 
         def _host_ok(self) -> bool:
-            if self.headers.get("Host", "") not in allowed_hosts:
+            host = self.headers.get("Host", "").lower()
+            if host not in allowed_hosts and not localhost_name.fullmatch(host):
                 self._json(403, {"error": "bad host"})
                 return False
             return True

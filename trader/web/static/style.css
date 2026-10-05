@@ -81,3 +81,9 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 /* No spinner arrows on number boxes (hover/focus); the ↑/↓ keys still step the value. */
 input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+
+/* OK button labelled and coloured by side (Buy / Sell); ↻ live-price button next to a price label */
+#dlg-ok.ok-buy { background: var(--buy); border-color: var(--buy); color: #fff; }
+#dlg-ok.ok-sell { background: var(--sell); border-color: var(--sell); color: #fff; }
+.ltp-fill { padding: 0 6px; margin-left: 4px; line-height: 1.4; font-size: 12px; background: transparent; color: var(--paper); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.ltp-fill:disabled { opacity: .5; }

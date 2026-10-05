@@ -58,3 +58,22 @@ def test_refused_add_leaves_nothing_on_the_strategy(tmp_path):
     res = strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 100, "stop_loss": 110})
     assert not res["ok"] and res["errors"]
     assert len(strat.view(sid)["legs"]) == 1
+
+
+def test_re_enter_a_closed_leg_on_the_other_side(tmp_path):
+    r, strat, tid, sid = one_leg(tmp_path)
+    r.price(85)
+    for _ in range(5):
+        r.tick()
+    assert r.trade(tid)["status"] == L.EXITED
+    res = strat.add_to_leg(tid, {"side": "SELL", "lots": 1, "price_type": "LIMIT", "entry_price": 85,
+                                 "stop_loss": 95, "target": 70})
+    assert res["ok"], res
+    assert r.trade(res["trade_id"])["side"] == "SELL" and r.trade(res["trade_id"])["group_id"] == sid
+
+
+def test_running_leg_cannot_be_added_to_on_the_other_side(tmp_path):
+    r, strat, tid, sid = one_leg(tmp_path)
+    res = strat.add_to_leg(tid, {"side": "SELL", "lots": 1, "price_type": "LIMIT", "entry_price": 100,
+                                 "stop_loss": 110})
+    assert not res["ok"] and "open as BUY" in res["errors"][0]
