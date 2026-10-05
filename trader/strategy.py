@@ -251,7 +251,7 @@ class StrategyService:
             # here wide enough that it is very unlikely to be the thing that actually exits the leg - capped
             # at 95% of TRADER_MAX_LOSS_PER_TRADE so a leg with no chosen stop still can't exceed the
             # account's own configured per-trade loss limit.
-            wide_points = (self.svc.cfg.max_loss_per_trade * 0.95) / qty
+            wide_points = (self.svc.cfg.auto_sl_loss * 0.95) / qty
             stop_loss = entry_price - wide_points if side == "BUY" else entry_price + wide_points
         stop_loss = round_to_tick(stop_loss, inst.tick_size, "SELL" if side == "BUY" else "BUY")
         if side == "BUY" and stop_loss <= 0:

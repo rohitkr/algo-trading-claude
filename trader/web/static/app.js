@@ -307,6 +307,7 @@ async function editFlow(tid) {
   box.querySelectorAll("input[name], select[name]").forEach((el) => { changes[el.name] = el.value; });
   {
     const p = await api(`/api/trades/${tid}/edit/prepare`, {changes});
+    if (!p.ok && (p.errors || []).join() === "nothing changed") return;   // saved without changes: just close
     if (!p.ok) return alertBox("Edit not allowed", p.errors || []);
     const rows = Object.entries(p.diff).map(([k, [a, b]]) => `<tr><td>${esc(k)}</td><td>${esc(a ?? "–")}</td><td>→ <b>${esc(b ?? "–")}</b></td></tr>`).join("");
     const ok = await dialog("Apply these changes?", `<table>${rows}</table>` +
@@ -386,10 +387,10 @@ async function refresh() {
     ["Last broker sync", tm(broker.last_sync)], ["Active trades", d.active.length],
     ["Reconciliation", rec.at ? `${tm(rec.at)} · mismatches ${rec.pending_mismatches} · need attention ${rec.needs_attention}` : "–"],
     ["Prices", `<span id="prices-status">${pricesText(d.quotes)}</span>`],
-    ["Daily P&L", money(v("daily_pnl"))], ["Trades today", `${d.trades_today} / ${d.risk_limits.max_trades_per_day}`],
+    ["Daily P&L", money(v("daily_pnl"))], ["Trades today", `${d.trades_today} / ${d.risk_limits.max_trades_per_day || "∞"}`],
     ["Last error", `<span class="err">${esc(v("last_error") || d.quotes.last_error || "–")}</span>`],
     ["Process", `${esc(proc.state || "?")} since ${tm(proc.started_at)} · heartbeat ${tm(v("heartbeat"))}`],
-    ["Limits", `open ≤ ${d.risk_limits.max_open_trades}, loss/day ${money(d.risk_limits.max_daily_loss)}, loss/trade ${money(d.risk_limits.max_loss_per_trade)}, window ${d.risk_limits.trading_window.join("–")}, square-off ${d.risk_limits.square_off_time || "off"}${d.risk_limits.mcx ? ` · MCX ${d.risk_limits.mcx[0]}–${d.risk_limits.mcx[1]}, square-off ${d.risk_limits.mcx[2] || "off"}` : ""}`],
+    ["Limits", `open ≤ ${d.risk_limits.max_open_trades || "off"}, loss/day ${d.risk_limits.max_daily_loss ? money(d.risk_limits.max_daily_loss) : "off"}, loss/trade ${d.risk_limits.max_loss_per_trade ? money(d.risk_limits.max_loss_per_trade) : "off"}, window ${d.risk_limits.trading_window.map((x) => x || "off").join("–")}, square-off ${d.risk_limits.square_off_time || "off"}${d.risk_limits.mcx ? ` · MCX ${d.risk_limits.mcx[0]}–${d.risk_limits.mcx[1]}, square-off ${d.risk_limits.mcx[2] || "off"}` : ""}`],
   ];
   setHTML($("#system"), rows.map(([k, x]) => `<div><span>${k}</span><span class="v">${x}</span></div>`).join(""));
   Live.reapply();

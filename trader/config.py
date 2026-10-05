@@ -138,6 +138,12 @@ class TraderConfig:
     mcx_square_off_time: time | None = time(23, 20)
     lot_units: dict = field(default_factory=lambda: dict(MCX_LOT_UNITS))
     max_entry_deviation_pct: float = 20.0
+
+    @property
+    def auto_sl_loss(self) -> float:
+        """Loss the app's automatic stop is sized for (strategy legs with no SL of their own): the per-trade
+        limit, or ₹10,000 when that limit is off."""
+        return self.max_loss_per_trade or 10_000.0
     require_ltp_for_entry: bool = True
     freeze_qty: dict = field(default_factory=lambda: dict(DEFAULT_FREEZE))
     confirm_token_s: float = 120.0

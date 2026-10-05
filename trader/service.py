@@ -404,7 +404,7 @@ class TradeService:
             except (TypeError, ValueError):
                 e_new, lots_new = None, None
             if e_new and lots_new and lots_new > 0:
-                pts = (self.cfg.max_loss_per_trade * 0.95) / (lots_new * t["lot_size"])
+                pts = (self.cfg.auto_sl_loss * 0.95) / (lots_new * t["lot_size"])
                 raw = e_new - pts if t["side"] == "BUY" else e_new + pts
                 if raw > 0:
                     merged["stop_loss"] = round_to_tick(raw, t["tick_size"], "SELL" if t["side"] == "BUY" else "BUY")
@@ -477,8 +477,8 @@ class TradeService:
             qty_cur = t["quantity"] if q["filled"] == 0 else q["open"]
             loss_new = _loss_at_stop(t["side"], basis_new, req.stop_loss, qty_new)
             loss_cur = _loss_at_stop(t["side"], basis_cur, t["current_sl"], qty_cur)
-            limit = self.cfg.max_loss_per_trade
-            ok = loss_new <= limit or loss_new <= loss_cur + 0.5
+            limit = self.cfg.max_loss_per_trade                   # 0 = off: no edit is ever blocked by it
+            ok = not limit or loss_new <= limit or loss_new <= loss_cur + 0.5
             fit = (basis_new - limit / qty_new if t["side"] == "BUY" else basis_new + limit / qty_new) if qty_new else None
             hint = ""
             if not ok and fit is not None and fit > 0:
@@ -486,9 +486,9 @@ class TradeService:
                 hint = (f"; use a stop-loss {'at or above' if t['side'] == 'BUY' else 'at or below'} ₹{fit:g}"
                         " or fewer lots")
             from .risk import RiskCheck
-            risk = [c for c in risk if c.name != "max_loss_per_trade"] + [RiskCheck(
+            risk = [c for c in risk if c.name != "max_loss_per_trade"] + ([RiskCheck(
                 "max_loss_per_trade", ok,
-                f"₹{loss_new:,.0f} at the stop, limit ₹{limit:,.0f} (was ₹{loss_cur:,.0f}){hint}")]
+                f"₹{loss_new:,.0f} at the stop, limit ₹{limit:,.0f} (was ₹{loss_cur:,.0f}){hint}")] if limit else [])
             errors += [f"{c.name}: {c.detail}" for c in risk if not c.passed]
         fields: dict = {}
         if "entry_price" in diff:

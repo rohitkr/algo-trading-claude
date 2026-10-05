@@ -88,3 +88,19 @@ def test_new_trades_still_respect_the_limit(tmp_path):
     p = r.svc.preview(dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
                            side="BUY", lots=5, entry_price=100, stop_loss=50, target=130))
     assert not p["ok"] and any(c["name"] == "max_loss_per_trade" and not c["passed"] for c in p["risk"])
+
+
+def test_limits_set_to_zero_are_off(tmp_path):
+    r = Rig(tmp_path, max_open_trades=0, max_trades_per_day=0, max_lots_per_trade=0, max_qty_per_trade=0,
+            max_order_value=0, max_loss_per_trade=0, max_daily_loss=0, max_entry_deviation_pct=0)
+    r.price(100)
+    p = r.svc.preview(dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
+                           side="BUY", lots=20, entry_price=100, stop_loss=1, target=300))
+    names = {c["name"] for c in p["risk"]}
+    assert p["ok"], p
+    assert not names & {"max_open_trades", "max_trades_per_day", "max_lots_per_trade", "max_qty_per_trade",
+                        "max_order_value", "max_loss_per_trade", "max_daily_loss", "entry_near_ltp"}
+    r.svc.confirm(p["trade_id"], p["token"])
+    r.tick()
+    plan = r.svc.prepare_edit(p["trade_id"], {"stop_loss": 0.05})          # any stop, no loss limit
+    assert plan["ok"], plan

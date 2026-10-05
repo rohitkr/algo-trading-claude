@@ -59,20 +59,26 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
     if square_off:
         add("before_square_off", t < square_off, f"square-off {square_off:%H:%M}")
     n_open = len(open_positions(open_trades, exclude_group=group_id))
-    add("max_open_trades", n_open < cfg.max_open_trades,
-        f"{n_open} open (a multi-leg strategy counts as one), limit {cfg.max_open_trades}")
-    add("max_trades_per_day", trades_today < cfg.max_trades_per_day,
-        f"{trades_today} today, limit {cfg.max_trades_per_day}")
-    add("max_lots_per_trade", lots <= cfg.max_lots_per_trade, f"{lots} lots, limit {cfg.max_lots_per_trade}")
-    add("max_qty_per_trade", quantity <= cfg.max_qty_per_trade, f"{quantity} units, limit {cfg.max_qty_per_trade}")
+    # every limit below: 0 = off (TRADER_MAX_*=0 in .env)
+    if cfg.max_open_trades:
+        add("max_open_trades", n_open < cfg.max_open_trades,
+            f"{n_open} open (a multi-leg strategy counts as one), limit {cfg.max_open_trades}")
+    if cfg.max_trades_per_day:
+        add("max_trades_per_day", trades_today < cfg.max_trades_per_day,
+            f"{trades_today} today, limit {cfg.max_trades_per_day}")
+    if cfg.max_lots_per_trade:
+        add("max_lots_per_trade", lots <= cfg.max_lots_per_trade, f"{lots} lots, limit {cfg.max_lots_per_trade}")
+    if cfg.max_qty_per_trade:
+        add("max_qty_per_trade", quantity <= cfg.max_qty_per_trade, f"{quantity} units, limit {cfg.max_qty_per_trade}")
     freeze = cfg.freeze_for(underlying)
     add("freeze_qty", quantity <= freeze, f"{quantity} units, {underlying} freeze limit {freeze} (no slicing)")
     value = entry * quantity
     if cfg.max_order_value:
         add("max_order_value", value <= cfg.max_order_value, f"₹{value:,.0f}, limit ₹{cfg.max_order_value:,.0f}")
     risk = abs(entry - stop) * quantity
-    add("max_loss_per_trade", risk <= cfg.max_loss_per_trade,
-        f"₹{risk:,.0f} at the stop, limit ₹{cfg.max_loss_per_trade:,.0f}")
+    if cfg.max_loss_per_trade:
+        add("max_loss_per_trade", risk <= cfg.max_loss_per_trade,
+            f"₹{risk:,.0f} at the stop, limit ₹{cfg.max_loss_per_trade:,.0f}")
     if cfg.max_daily_loss:
         add("max_daily_loss", day_pnl > -cfg.max_daily_loss, f"today ₹{day_pnl:,.0f}, limit -₹{cfg.max_daily_loss:,.0f}")
     if cfg.max_daily_profit:

@@ -99,8 +99,7 @@ function restoreConfig() {
   if (c.start_time) $("#cfg-start-time").value = c.start_time;
   if (c.square_off_time) $("#cfg-square-off").value = c.square_off_time;
   if (Array.isArray(c.days)) $$(".day").forEach((b) => b.classList.toggle("on", c.days.includes(b.dataset.day)));
-  if (c.exit_profit_amount != null) $("#cfg-exit-profit").value = c.exit_profit_amount;
-  if (c.exit_loss_amount != null) $("#cfg-exit-loss").value = c.exit_loss_amount;
+  // overall profit / loss exits are NOT carried over: a remembered ₹3,000 loss exit closed strategy #68 unnoticed
   if (c.no_trade_after) $("#cfg-no-trade-after").value = c.no_trade_after;
   if (c.trailing_mode) { const el = $(`input[name=trailing_mode][value="${c.trailing_mode}"]`); if (el) el.checked = true; }
   if (c.move_sl_to_cost_enabled) $("#cfg-sl-cost-enabled").checked = true;
@@ -938,6 +937,7 @@ async function editLeg(tid) {
     if (slPrice != null) changes.stop_loss = slPrice;
     changes.target = tpPrice ?? "";
     const p = await api(`/api/trades/${tid}/edit/prepare`, {changes});
+    if (!p.ok && (p.errors || []).join() === "nothing changed") return;   // saved without changes: just close
     if (!p.ok) return alertBox("Edit not allowed", p.errors || []);
     if (!Object.keys(p.diff).length) return;   // nothing actually changed
     const rows = Object.entries(p.diff).map(([k, [a, b]]) => `<tr><td>${esc(k)}</td><td>${esc(a ?? "–")}</td><td>→ <b>${esc(b ?? "–")}</b></td></tr>`).join("");
