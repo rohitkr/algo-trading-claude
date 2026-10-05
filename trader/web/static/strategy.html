@@ -52,8 +52,6 @@
     <div class="field-group">
       <label class="group-label">Risk management</label>
       <div class="grid3">
-        <label>Exit when overall profit (₹) <input type="number" id="cfg-exit-profit" min="0" step="1" placeholder="off"></label>
-        <label>Exit when overall loss (₹) <input type="number" id="cfg-exit-loss" min="0" step="1" placeholder="off"></label>
         <label>No trade after <input type="time" id="cfg-no-trade-after"></label>
       </div>
     </div>
@@ -102,12 +100,11 @@
     </div>
 
     <div class="spot-panel">
-      <div class="spot-symbol" id="base-spot-symbol">–</div>
+      <select id="base-underlying" class="spot-instrument" aria-label="Instrument"></select>
       <div class="spot-value" id="base-spot">–</div>
       <button type="button" id="refresh-spot" class="spin-btn" title="Refresh spot price">↻ Spot</button>
     </div>
-    <div class="grid3 base-select">
-      <label>Instrument <select id="base-underlying"></select></label>
+    <div class="base-select base-row">
       <label>Expiry <select id="base-expiry"></select></label>
       <label>Lot multiplier
         <select id="lot-multiplier" title="Multiplies each leg's own lot count (like Sensibull's multiplier)">
@@ -117,14 +114,19 @@
           <option value="20">20x</option><option value="25">25x</option>
         </select>
       </label>
+      <!-- combined exit for all legs: reaching either squares off every leg; editable after placing -->
+      <label title="Combined loss of all legs that squares off every leg (blank = off); can be changed after placing">Max loss ₹
+        <input type="number" id="cfg-exit-loss" min="0" step="1" placeholder="off"></label>
+      <label title="Combined profit of all legs that squares off every leg (blank = off); can be changed after placing">Max profit ₹
+        <input type="number" id="cfg-exit-profit" min="0" step="1" placeholder="off"></label>
     </div>
-    <p class="hint small">Stop-loss / target per leg are optional - leave blank to rely only on the overall profit/loss exit below.</p>
+    <p class="hint small">Stop-loss / target per leg are optional - leave blank to rely only on the max loss / max profit above.</p>
 
     <div class="leg-table-wrap">
       <table class="leg-table" id="leg-table">
         <thead><tr>
           <th></th><th></th><th>B/S</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Lots</th>
-          <th>Price <button type="button" id="refresh-prices" class="spin-btn" title="Refresh LTP for every leg">↻</button></th>
+          <th>Price <button type="button" id="refresh-prices" class="spin-btn" title="Reset LTP for every leg">↻</button></th>
           <th>SL (optional)</th><th>TP (optional)</th><th></th>
         </tr></thead>
         <tbody id="leg-tbody"></tbody>

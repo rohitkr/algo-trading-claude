@@ -60,6 +60,12 @@ def _num(v) -> float | None:
     return float(v) if v not in (None, "") else None
 
 
+def _amount(v) -> float | None:
+    """A combined max profit / max loss in rupees: blank, 0 or negative = off."""
+    n = _num(v)
+    return n if n is not None and n > 0 else None
+
+
 @dataclass
 class GlobalConfig:
     name: str = ""
@@ -89,8 +95,8 @@ class GlobalConfig:
         days = tuple(str(x).upper()[:3] for x in (d.get("days") or ()))
         return cls(name=str(d.get("name") or "").strip(), order_type=order_type,
                    start_time=_time(d.get("start_time")), square_off_time=_time(d.get("square_off_time")),
-                   days=days, exit_profit_amount=_num(d.get("exit_profit_amount")),
-                   exit_loss_amount=_num(d.get("exit_loss_amount")), no_trade_after=_time(d.get("no_trade_after")),
+                   days=days, exit_profit_amount=_amount(d.get("exit_profit_amount")),
+                   exit_loss_amount=_amount(d.get("exit_loss_amount")), no_trade_after=_time(d.get("no_trade_after")),
                    trailing_mode=trailing_mode, lock_if_profit_reaches=_num(d.get("lock_if_profit_reaches")),
                    lock_profit_at=_num(d.get("lock_profit_at")), trail_every_increase=_num(d.get("trail_every_increase")),
                    trail_profit_by=_num(d.get("trail_profit_by")),
@@ -394,6 +400,24 @@ class StrategyService:
                 self.repo.update_trade(t["id"], pending_exit_reason=reason)
                 self.svc.audit(t["id"], "EXIT_TRIGGERED", "WARNING", {"reason": reason, "strategy_id": s["id"]})
         self.repo.update_strategy(s["id"], status="DONE", exit_reason=reason, exit_time=self.repo.now())
+
+    # -- combined max loss / max profit of a placed strategy ----------------------------------------
+    def set_exits(self, strategy_id: int, payload: dict) -> dict:
+        """Change a strategy's combined max loss / max profit (blank = off). Applies from the next tick: if the
+        combined P&L is already past a new limit, every open leg is squared off then."""
+        with self.svc.lock:
+            s = self.repo.strategy(strategy_id)
+            if s is None:
+                raise ActionError(f"no strategy {strategy_id}")
+            if s["status"] != "ACTIVE":
+                raise ActionError(f"strategy {strategy_id} is {s['status']}: nothing running to protect")
+            cfg = json.loads(s["config"])
+            old = {k: cfg.get(k) for k in ("exit_loss_amount", "exit_profit_amount")}
+            new = {k: _amount(payload.get(k)) for k in old}
+            cfg.update(new)
+            self.repo.update_strategy(strategy_id, config=json.dumps(GlobalConfig.from_json(cfg).to_json()))
+            self.svc.audit(None, "STRATEGY_EXITS_CHANGED", "INFO", {"strategy_id": strategy_id, "from": old, "to": new})
+            return {"ok": True, "strategy": self.view(strategy_id)}
 
     # -- manual exit-all (user pressed "Exit strategy") --------------------------------------------
     def exit_all(self, strategy_id: int) -> dict:

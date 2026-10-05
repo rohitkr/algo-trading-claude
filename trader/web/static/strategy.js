@@ -130,7 +130,6 @@ async function onBaseUnderlying() {
   const info = META.underlyings[$("#base-underlying").value] || {};
   $("#base-expiry").innerHTML = (info.expiries || []).map((e) => `<option>${esc(e)}</option>`).join("");
   if (RESTORING && STORED?.expiry && (info.expiries || []).includes(STORED.expiry)) $("#base-expiry").value = STORED.expiry;
-  $("#base-spot-symbol").textContent = $("#base-underlying").value;
   $("#base-spot").dataset.price = `SPOT:${$("#base-underlying").value}`;   // pushed by live.js
   $("#base-spot").dataset.fmt = "money";
   Live.watch([$("#base-spot").dataset.price]);
@@ -741,18 +740,21 @@ function confirmOrders(active) {
   let rows = [...active.filter((l) => l.side === "BUY"), ...active.filter((l) => l.side !== "BUY")]
     .map((l) => ({leg: l, type: "LIMIT", price: l.entry_price}));
   const d = $("#dlg");
-  $("#dlg-title").textContent = `Place ${rows.length} order(s)`;
-  $("#dlg-live").classList.toggle("hidden", MODE !== "LIVE");
+  // compact: a small LIVE tag in the title instead of a line of text (the page banner says LIVE too)
+  $("#dlg-title").innerHTML = `Place ${rows.length} order${rows.length > 1 ? "s" : ""}${MODE === "LIVE" ? '<span class="live-tag">LIVE</span>' : ""}`;
+  $("#dlg-live").classList.add("hidden");
   const sides = new Set(rows.map((r) => r.leg.side));
   if (sides.size === 1) { const sd = [...sides][0]; okButton(sd === "BUY" ? "Buy" : "Sell", sd); }
   else okButton("Place orders");
   const draw = () => {
     const sellFirst = rows.findIndex((r) => r.leg.side === "SELL") < rows.map((r) => r.leg.side).lastIndexOf("BUY") &&
       rows.some((r) => r.leg.side === "SELL");
+    const all = rows.every((r) => r.type === "LIMIT") ? "LIMIT" : rows.every((r) => r.type === "MARKET") ? "MARKET" : "";
     $("#dlg-body").innerHTML = `
-      <div class="order-all">All legs: <button type="button" data-all="LIMIT">Limit</button>
-        <button type="button" data-all="MARKET">Market</button></div>
-      <table class="order-confirm"><tr><th></th><th>#</th><th>Side</th><th>Contract</th><th>Lots</th><th>Type</th><th>Price</th><th>Order</th></tr>
+      <div class="order-all">All legs: <button type="button" data-all="LIMIT" class="${all === "LIMIT" ? "on" : ""}">Limit</button>
+        <button type="button" data-all="MARKET" class="${all === "MARKET" ? "on" : ""}">Market</button></div>
+      <table class="order-confirm"><tr><th></th><th>#</th><th>Side</th><th>Contract</th><th>Lots</th><th>Type</th>
+        <th>Price <button type="button" class="spin-btn" data-reset-ltp title="Reset LTP for every leg">↻</button></th><th>Order</th></tr>
       ${rows.map((r, i) => `<tr data-row="${i}">
         <td class="drag-handle" data-drag="${i}" title="Drag to re-arrange" aria-label="Drag to re-arrange">⠿</td>
         <td>${i + 1}</td><td class="${r.leg.side}">${r.leg.side} ${r.leg.option_type}</td>
@@ -764,8 +766,6 @@ function confirmOrders(active) {
         <td><button type="button" data-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
           <button type="button" data-down="${i}" ${i === rows.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button></td>
       </tr>`).join("")}</table>
-      <p class="hint small">Orders are sent top to bottom: drag ⠿ (or use ↑ ↓) to re-arrange. Market = marketable limit at the live price (fills at once, protected
-        from bad fills). If any leg fails its checks, nothing is sent; if a BUY (hedge) fails, the SELL legs are not sent.</p>
       ${sellFirst ? `<p class="strategy-warning">⚠ A SELL leg is placed before a BUY leg: it goes in unhedged for a moment and
         needs more margin. Move BUY legs up unless you mean it.</p>` : ""}`;
   };
@@ -775,6 +775,16 @@ function confirmOrders(active) {
       const b = e.target.closest("button");
       if (!b) return;
       if (b.dataset.all) rows.forEach((r) => { r.type = b.dataset.all; });
+      if (b.dataset.resetLtp !== undefined) {           // every Limit price <- the contract's live price
+        b.classList.add("spinning");
+        Promise.all(rows.map(async (r) => {
+          try {
+            const c = await api(`/api/contract?ltp=1&force=1&underlying=${encodeURIComponent(r.leg.underlying)}&expiry=${r.leg.expiry}&strike=${r.leg.strike}&option_type=${r.leg.option_type}`);
+            if (c.ltp != null) r.price = toTick(Number(c.ltp), Number(c.tick_size) || 0.05);
+          } catch (err) { /* keep the price shown */ }
+        })).then(draw);
+        return;
+      }
       const i = Number(b.dataset.up ?? b.dataset.down);
       if (b.dataset.up !== undefined) [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]];
       if (b.dataset.down !== undefined) [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]];
@@ -901,6 +911,9 @@ function strategyCard(s) {
       <span class="pnl ${cls}" data-strategy-pnl="${s.id}">${money(s.combined_pnl)}</span>
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
+    ${s.status === "ACTIVE" ? `<div class="strategy-exits">Combined exit: max loss <b>${cfg.exit_loss_amount ? money(cfg.exit_loss_amount) : "off"}</b>
+      · max profit <b>${cfg.exit_profit_amount ? money(cfg.exit_profit_amount) : "off"}</b>
+      <button type="button" class="link-btn" data-exits="${s.id}">Edit</button></div>` : ""}
     ${failedHtml}
     <div class="leg-table-scroll">
     <table class="legs-live"><tr><th class="c-side">Side</th><th class="c-sym">Symbol</th><th class="num c-qty">Qty</th><th class="num c-px">Entry</th>
@@ -1084,6 +1097,24 @@ async function addLeg(tid, reenter) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
+// Change a running strategy's combined max loss / max profit (blank = off).
+async function editExits(sid) {
+  try {
+    const s = (await api(`/api/strategies/${sid}`)).strategy;
+    const c = s.config;
+    const ok = await dialog(`Combined exit: #${s.id} ${s.name}`, `
+      <p class="hint small">All legs are squared off when the combined P&amp;L (now <b>${money(s.combined_pnl)}</b>) reaches either. Blank = off.</p>
+      <div class="edit-leg-grid">
+        <label>Max loss ₹ <input id="ex-loss" type="number" min="0" step="1" placeholder="off" value="${c.exit_loss_amount ?? ""}"></label>
+        <label>Max profit ₹ <input id="ex-profit" type="number" min="0" step="1" placeholder="off" value="${c.exit_profit_amount ?? ""}"></label>
+      </div>`);
+    if (!ok) return;
+    await api(`/api/strategies/${sid}/exits`, {exit_loss_amount: $("#ex-loss").value || null,
+                                                exit_profit_amount: $("#ex-profit").value || null});
+    refreshStrategies();
+  } catch (e) { alertBox("Error", [e.message]); }
+}
+
 async function cancelLeg(tid) {
   try {
     const p = await api(`/api/trades/${tid}/prepare`, {action: "CANCEL"});
@@ -1113,8 +1144,23 @@ Live.onStrategy((id, v) => {
   const s = STRATEGIES.find((x) => x.id === id);
   if (s && v != null) { s.combined_pnl = v; renderPeriodTotal(); }
 });
+// "Show cancelled": strategies where nothing was ever bought or sold are hidden by default (remembered).
+const placedSomething = (s) => s.status === "ACTIVE" || (s.legs || []).some((t) => (t.filled_qty || 0) > 0);
+let SHOW_CANCELLED = false;
+try { SHOW_CANCELLED = localStorage.getItem("trader:strategies:show-cancelled") === "1"; } catch (e) { /* ignore */ }
+{
+  const lab = document.createElement("label");
+  lab.innerHTML = `<input type="checkbox" id="show-cancelled" ${SHOW_CANCELLED ? "checked" : ""}> Show cancelled`;
+  $("#strategies-filter").insertBefore(lab, $("#strategies-filter .history-pager"));
+  $("#show-cancelled").onchange = (e) => {
+    SHOW_CANCELLED = e.target.checked;
+    try { localStorage.setItem("trader:strategies:show-cancelled", SHOW_CANCELLED ? "1" : "0"); } catch (err) { /* ignore */ }
+    renderStrategies();
+  };
+}
 function renderStrategies() {
-  const {pinned, page, total, shown} = STRAT_FILTER.apply(STRATEGIES, (s) => s.created_at, (s) => s.status === "ACTIVE");
+  const list_ = SHOW_CANCELLED ? STRATEGIES : STRATEGIES.filter(placedSomething);
+  const {pinned, page, total, shown} = STRAT_FILTER.apply(list_, (s) => s.created_at, (s) => s.status === "ACTIVE");
   SHOWN = shown;
   renderPeriodTotal();
   const html = [...pinned, ...page].map(strategyCard).join("") ||
@@ -1160,6 +1206,8 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (cid) return cancelLeg(Number(cid));
   const eid = ev.target.dataset.legEdit;
   if (eid) return editLeg(Number(eid));
+  const xid = ev.target.dataset.exits;
+  if (xid) return editExits(Number(xid));
   const sid = ev.target.dataset.strategyLtp;
   if (sid) {
     const btn = ev.target;
