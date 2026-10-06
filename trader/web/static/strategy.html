@@ -13,14 +13,18 @@
 <header class="topbar">
   <h1>Strategy Builder</h1>
   <div class="topbar-right">
+    <button type="button" id="settings-open" class="settings-btn" aria-controls="config-panel" aria-expanded="false"
+      title="Order type, timings, trailing, move SL to cost">⚙ Settings <span id="settings-chip" class="settings-chip"></span></button>
     <a class="navlink" href="/">← Single trade</a>
     <button type="button" id="theme-toggle" title="Switch light/dark">🌙</button>
   </div>
 </header>
 
 <main>
-  <section class="panel" id="config-panel">
-    <h2>Global configuration</h2>
+  <div id="drawer-scrim" class="drawer-scrim" hidden></div>
+  <section class="panel drawer" id="config-panel" aria-label="Global configuration" aria-hidden="true">
+    <div class="drawer-head"><h2>Global configuration</h2>
+      <button type="button" id="settings-close" class="icon-btn" aria-label="Close settings">✕</button></div>
 
     <div class="field-group">
       <label class="group-label">Order type</label>
@@ -87,22 +91,30 @@
     </div>
   </section>
 
-  <section class="panel wide" id="legs-panel">
-    <div class="panel-head">
-      <h2>Legs</h2>
-      <div class="templates">
-        <span class="hint small">Templates:</span>
-        <button type="button" class="tmpl-btn" data-tmpl="straddle">Short Straddle</button>
-        <button type="button" class="tmpl-btn" data-tmpl="strangle">Short Strangle</button>
-        <button type="button" class="tmpl-btn" data-tmpl="iron_condor">Iron Condor</button>
-        <button type="button" class="tmpl-btn" data-tmpl="iron_fly">Iron Fly</button>
-      </div>
-    </div>
-
+  <div class="workspace" id="workspace">
+  <section class="panel builder" id="legs-panel">
     <div class="spot-panel">
       <select id="base-underlying" class="spot-instrument" aria-label="Instrument"></select>
+      <select id="tmpl-select" class="tmpl-select" aria-label="Load a template" title="Replace the legs with a ready-made strategy">
+        <option value="">Templates</option>
+        <optgroup label="Neutral (sell premium)">
+          <option value="straddle">Short Straddle</option><option value="strangle">Short Strangle</option>
+          <option value="iron_condor">Short Iron Condor</option><option value="iron_fly">Short Iron Fly</option>
+        </optgroup>
+        <optgroup label="Big move (buy premium)">
+          <option value="long_straddle">Long Straddle</option><option value="long_strangle">Long Strangle</option>
+          <option value="long_iron_condor">Long Iron Condor</option><option value="long_iron_fly">Long Iron Fly</option>
+        </optgroup>
+        <optgroup label="Bullish">
+          <option value="bull_call_spread">Bull Call Spread</option><option value="bull_put_spread">Bull Put Spread</option>
+        </optgroup>
+        <optgroup label="Bearish">
+          <option value="bear_put_spread">Bear Put Spread</option><option value="bear_call_spread">Bear Call Spread</option>
+        </optgroup>
+      </select>
       <div class="spot-value" id="base-spot">–</div>
-      <button type="button" id="refresh-spot" class="spin-btn" title="Refresh spot price">↻ Spot</button>
+      <span class="spot-chg" id="spot-chg"></span>
+      <button type="button" id="refresh-spot" class="spin-btn" title="Refresh spot price">↻</button>
     </div>
     <div class="base-select base-row">
       <label>Expiry <select id="base-expiry"></select></label>
@@ -120,41 +132,42 @@
       <label title="Combined profit of all legs that squares off every leg (blank = off); can be changed after placing">Max profit ₹
         <input type="number" id="cfg-exit-profit" min="0" step="1" placeholder="off"></label>
     </div>
-    <p class="hint small">Stop-loss / target per leg are optional - leave blank to rely only on the max loss / max profit above.</p>
-
     <div class="leg-table-wrap">
       <table class="leg-table" id="leg-table">
         <thead><tr>
           <th></th><th></th><th>B/S</th><th>Expiry</th><th>Strike</th><th>Type</th><th>Lots</th>
           <th>Price <button type="button" id="refresh-prices" class="spin-btn" title="Reset LTP for every leg">↻</button></th>
-          <th>SL (optional)</th><th>TP (optional)</th><th></th>
+          <th title="Optional per leg: blank = rely on the max loss above">SL (optional)</th>
+          <th title="Optional per leg: blank = rely on the max profit above">TP (optional)</th><th></th>
         </tr></thead>
         <tbody id="leg-tbody"></tbody>
       </table>
     </div>
     <button type="button" id="add-leg">+ Add leg</button>
 
-    <div id="leg-summaries" class="leg-summaries"></div>
+    <p id="form-hint" class="hint"></p>
+  </section>
 
-    <div class="grid3 calc-row">
+  <div class="rail-resizer" id="rail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the summary panel" tabindex="0"></div>
+
+  <aside class="panel rail" id="summary-rail">
+    <div class="stats-grid" id="payoff-stats"></div>
+    <div class="calc-row">
       <div>Price get <output id="calc-price-get">–</output></div>
       <div>Premium get <output id="calc-premium-get">–</output></div>
       <div>Charges (est.) <output id="calc-charges">–</output></div>
     </div>
-
+    <div class="payoff-sltp" id="payoff-sltp"></div>
     <div class="payoff-block">
       <h3>Payoff at expiry</h3>
       <div id="payoff-chart"></div>
-      <div class="grid3 payoff-stats" id="payoff-stats"></div>
-      <div class="payoff-sltp" id="payoff-sltp"></div>
     </div>
-
-    <p id="form-hint" class="hint"></p>
     <div class="action-row">
       <button type="button" id="save-draft" class="ghost">Add to drafts</button>
       <button type="button" id="trade-all" class="primary">Trade all</button>
     </div>
-  </section>
+  </aside>
+  </div>
 
   <section class="panel wide" id="strategies-panel">
     <h2>Strategies <span id="strategies-total" class="period-total" title="Sum of the P&amp;L of every strategy in the selected period (running ones included)"></span></h2>

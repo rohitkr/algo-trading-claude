@@ -100,6 +100,23 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist, mcfg=None) -> App
     from live.audit import AuditLog
     audit = AuditLog(cfg.audit_dir, cfg.mode, clock=clock, instance="trader")
     svc = TradeService(cfg, repo, broker, instruments, quotes, clock, audit_log=audit)
+    if zcfg.api_key:
+        def rest_kite():
+            if live_kite is not None:
+                return live_kite
+            from zerodha.auth import connected_kite        # PAPER: today's saved login (as the price stream)
+            return connected_kite(zcfg)
+
+        def prev_close(underlying: str):
+            # Kite ohlc() by instrument token: "close" is the last trading day's close (for the spot's % change)
+            tok = str(_spot_token(instruments, underlying))
+            return (rest_kite().ohlc([tok]).get(tok) or {}).get("ohlc", {}).get("close")
+        svc.prev_close_fn = prev_close
+
+        def margin(orders: list[dict]):
+            # Kite basket margins for a strategy before it is placed (hedge benefit included; display only)
+            return rest_kite().basket_order_margins(orders, consider_positions=False)
+        svc.margin_fn = margin
     strategies = StrategyService(svc, repo)
     svc.extra_tick = strategies.tick        # combined-P&L rules run right after the per-trade engine, every tick
     from .stream import TickHub

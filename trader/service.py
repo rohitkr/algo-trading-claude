@@ -1392,7 +1392,30 @@ class TradeService:
                 px = self.quotes.spot(underlying, max_age=0 if force else self.cfg.quote_ttl_s)
             except Exception as exc:
                 self.repo.set_status_value("last_error", f"spot {underlying}: {exc}")
-        return {"underlying": underlying, "spot": px}
+        prev = self.prev_close(underlying) if with_ltp else None
+        return {"underlying": underlying, "spot": px, "prev_close": prev,
+                "change_pct": round((px - prev) / prev * 100, 2) if px and prev else None}
+
+    def prev_close(self, underlying: str) -> float | None:
+        """The underlying's previous close (for the "+0.98%" next to the spot; display only). One Kite call per
+        underlying per day (prev_close_fn, wired in app.py); a failed lookup is retried at most once a minute."""
+        fn = getattr(self, "prev_close_fn", None)
+        if fn is None:
+            return None
+        cache = self.__dict__.setdefault("_prev_close", {})
+        now = self.clock()
+        key = (underlying.upper(), now.date())
+        hit = cache.get(key)
+        if hit and (hit[0] is not None or (now - hit[1]).total_seconds() < 60):
+            return hit[0]
+        try:
+            v = fn(underlying)
+            v = float(v) if v else None
+        except Exception as exc:
+            log.warning("previous close for %s: %s", underlying, exc)
+            v = None
+        cache[key] = (v, now)
+        return v
 
     def _no_price_source(self, underlying: str) -> str | None:
         """Why this underlying can have no price at all with the configured source (else None)."""

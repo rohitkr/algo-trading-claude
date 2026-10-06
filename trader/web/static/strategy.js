@@ -145,11 +145,23 @@ async function onBaseUnderlying() {
   saveStored();
 }
 
+// "+0.98%" next to the spot: vs the previous close (from the server, once a day per instrument)
+let PREV_CLOSE = null;
+function renderSpotChange() {
+  const el = $("#spot-chg");
+  if (SPOT == null || !PREV_CLOSE) { el.textContent = ""; el.className = "spot-chg"; return; }
+  const pct = (SPOT - PREV_CLOSE) / PREV_CLOSE * 100, pts = SPOT - PREV_CLOSE;
+  el.textContent = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+  el.title = `${pts >= 0 ? "+" : ""}${pts.toFixed(2)} vs previous close ${PREV_CLOSE}`;
+  el.className = `spot-chg ${pct >= 0 ? "pos" : "neg"}`;
+}
 async function refreshSpot(force, keepDisplay) {
-  if (!keepDisplay) { SPOT = null; $("#base-spot").textContent = "–"; }   // switching instrument: old price is meaningless
+  if (!keepDisplay) { SPOT = null; PREV_CLOSE = null; $("#base-spot").textContent = "–"; renderSpotChange(); }   // switching instrument: old price is meaningless
   try {
     const s = await api(`/api/spot?ltp=1${force ? "&force=1" : ""}&underlying=${encodeURIComponent($("#base-underlying").value)}`);
     SPOT = s.spot; $("#base-spot").textContent = s.spot == null ? "no price" : money(s.spot);
+    PREV_CLOSE = s.prev_close ?? null;
+    renderSpotChange();
     $("#base-spot").title = s.error || "";
     if (s.error) $("#form-hint").textContent = s.error;
   } catch (e) { /* leave as no price */ }
@@ -301,6 +313,20 @@ function wrongSide(leg, kind) {
   return ` class="bad" title="${leg.side}: ${what} must be ${below ? "below" : "above"} the entry ${e}"`;
 }
 
+// B <-> S for a leg (builder row or the order pop-up). A stop-loss / target typed as a PRICE is side-specific
+// (BUY: SL below entry; SELL: above): flip it to the other side of the entry, same distance, so B -> S never
+// leaves a stop on the wrong side.
+function flipSide(leg) {
+  leg.side = leg.side === "BUY" ? "SELL" : "BUY";
+  const e = Number(leg.entry_price);
+  for (const [v, t] of [["sl_value", "sl_type"], ["tp_value", "tp_type"]]) {
+    if (leg[t] === "PRICE" && leg[v] != null && e > 0) {
+      const flipped = Math.round((2 * e - Number(leg[v])) * 100) / 100;
+      leg[v] = flipped > 0 ? flipped : null;
+    }
+  }
+}
+
 function renderLegs() {
   // Re-rendering replaces every input, so keep the focused one focused: each ↑/↓ on a number box fires
   // "change" and re-renders, which used to drop focus after the first key press.
@@ -309,7 +335,6 @@ function renderLegs() {
   $("#leg-tbody").innerHTML = LEGS.map(legRow).join("") ||
     `<tr><td colspan="11" class="hint small">No legs yet - add one or pick a template above.</td></tr>`;
   if (keep) $(`#leg-tbody tr[data-id="${keep.id}"] [data-f="${keep.f}"]`)?.focus();
-  renderSummaries();
   renderCalc();
   renderPayoff();
   saveStored();          // one choke point: every leg add/remove/edit/template/price-refresh calls this
@@ -368,81 +393,181 @@ function legSlTpPnl(leg) {
   return {slPnl, tpPnl};
 }
 
+// -- option pricing for the "today" curve (Black-Scholes on the spot, r = 0; display only) -------------------
+function normCdf(x) {               // Abramowitz-Stegun 26.2.17, |error| < 7.5e-8
+  const t = 1 / (1 + 0.2316419 * Math.abs(x)), d = 0.3989423 * Math.exp(-x * x / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x > 0 ? 1 - p : p;
+}
+function bsPrice(S, K, T, vol, type) {
+  if (T <= 0 || vol <= 0) return type === "CE" ? Math.max(S - K, 0) : Math.max(K - S, 0);
+  const sd = vol * Math.sqrt(T), d1 = (Math.log(S / K) + sd * sd / 2) / sd, d2 = d1 - sd;
+  return type === "CE" ? S * normCdf(d1) - K * normCdf(d2) : K * normCdf(-d2) - S * normCdf(-d1);
+}
+function impliedVol(price, S, K, T, type) {   // bisection; null when the price is below intrinsic / no time left
+  if (!(price > 0) || !(S > 0) || T <= 0) return null;
+  let lo = 0.005, hi = 5;
+  if (bsPrice(S, K, T, lo, type) > price || bsPrice(S, K, T, hi, type) < price) return null;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (bsPrice(S, K, T, mid, type) > price) hi = mid; else lo = mid;
+  }
+  return (lo + hi) / 2;
+}
+// years to the leg's expiry (15:30 IST on the expiry date)
+function yearsToExpiry(expiry) {
+  const ms = new Date(`${expiry}T15:30:00+05:30`).getTime() - Date.now();
+  return Math.max(0, ms) / (365 * 24 * 3600 * 1000);
+}
+const niceStep = (span, n) => {
+  const raw = span / n, mag = 10 ** Math.floor(Math.log10(raw)), f = raw / mag;
+  return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * mag;
+};
+const compact = (v) => {           // 45,711 -> 45.7K, 312000 -> 3.12L (Indian), for axes and tiles
+  const a = Math.abs(v), sg = v < 0 ? "-" : "";
+  if (a >= 1e7) return `${sg}${+(a / 1e7).toFixed(2)}Cr`;
+  if (a >= 1e5) return `${sg}${+(a / 1e5).toFixed(2)}L`;
+  if (a >= 1e3) return `${sg}${+(a / 1e3).toFixed(1)}K`;
+  return `${sg}${Math.round(a)}`;
+};
+let MARGIN = {key: "", margin: null, charges: null};
+
 function renderPayoff() {
   const legs = LEGS.filter((l) => l.checked && l.strike && l.entry_price != null);
   const box = $("#payoff-chart"), stats = $("#payoff-stats");
   if (legs.length < LEGS.filter((l) => l.checked).length) {
-    box.innerHTML = `<p class="hint small">Waiting on a price for every leg…</p>`;
+    box.innerHTML = `<p class="hint small chart-wait">Waiting on a price for every leg…</p>`;
     stats.innerHTML = "";
     return;
   }
-  if (!legs.length) { box.innerHTML = `<p class="hint small">Add a leg to see its payoff.</p>`; stats.innerHTML = ""; return; }
+  if (!legs.length) { box.innerHTML = `<p class="hint small chart-wait">Add a leg to see its payoff.</p>`; stats.innerHTML = ""; return; }
+
+  // implied vol per leg from its own price -> the "today" curve and the +-1/2 SD range
+  const S0 = SPOT;
+  legs.forEach((l) => { l._T = yearsToExpiry(l.expiry); l._iv = S0 ? impliedVol(l.entry_price, S0, l.strike, l._T, l.option_type) : null; });
+  const withIv = legs.filter((l) => l._iv);
+  const atmIv = withIv.length ? withIv.reduce((s, l) => s + l._iv, 0) / withIv.length : null;
+  const Tmin = Math.min(...legs.map((l) => l._T));
+  const sdPts = S0 && atmIv && Tmin > 0 ? S0 * atmIv * Math.sqrt(Tmin) : null;
+  const today = sdPts && withIv.length === legs.length;   // every leg priced by the model: draw the blue line
+  const todayPnl = (x) => legs.reduce((s, l) =>
+    s + (l.side === "BUY" ? 1 : -1) * (bsPrice(x, l.strike, l._T, l._iv, l.option_type) - l.entry_price) * l.lots * (l.lot_size || 1), 0);
 
   const strikes = legs.map((l) => l.strike);
   const spread = Math.max(...strikes) - Math.min(...strikes);
   const pad = Math.max(BASE_STEP * 6, spread * 0.6, 1);
-  const lo = Math.min(...strikes) - pad, hi = Math.max(...strikes) + pad;
+  let lo = Math.min(...strikes) - pad, hi = Math.max(...strikes) + pad;
+  if (sdPts) { lo = Math.min(lo, S0 - 2.3 * sdPts); hi = Math.max(hi, S0 + 2.3 * sdPts); }
   const xs = new Set([lo, hi]);
-  for (let i = 0; i <= 100; i++) xs.add(lo + ((hi - lo) * i) / 100);
+  for (let i = 0; i <= 160; i++) xs.add(lo + ((hi - lo) * i) / 160);
   strikes.forEach((k) => { xs.add(k - 0.01); xs.add(k); xs.add(k + 0.01); });   // land exactly on the kinks
   const points = Array.from(xs).sort((a, b) => a - b).map((x) => [x, combinedPayoff(x, legs)]);
+  const tPoints = today ? points.filter((_, i) => i % 2 === 0).map(([x]) => [x, todayPnl(x)]) : [];
 
-  let maxY = Math.max(0, ...points.map((p) => p[1])), minY = Math.min(0, ...points.map((p) => p[1]));
+  const ys = [...points.map((p) => p[1]), ...tPoints.map((p) => p[1])];
+  let maxY = Math.max(0, ...ys), minY = Math.min(0, ...ys);
   if (maxY === minY) { maxY += 1; minY -= 1; }
+  const yPad = (maxY - minY) * 0.08; maxY += yPad; minY -= yPad;
   const breakevens = [];
   for (let i = 1; i < points.length; i++) {
     const [x0, y0] = points[i - 1], [x1, y1] = points[i];
     if ((y0 < 0 && y1 >= 0) || (y0 > 0 && y1 <= 0)) breakevens.push(x0 + (x1 - x0) * (0 - y0) / (y1 - y0));
   }
 
-  const W = 640, H = 240, mL = 54, mR = 14, mT = 14, mB = 26;
+  // drawn at the box's real pixel size (the rail is resizable; ResizeObserver below redraws), so text stays crisp
+  const W = Math.max(280, Math.round(box.clientWidth - 8)), H = Math.max(160, Math.round(box.clientHeight - 8));
+  const mL = 52, mR = 12, mT = 30, mB = 24;
   const pw = W - mL - mR, ph = H - mT - mB;
   const xScale = (x) => mL + ((x - lo) / (hi - lo)) * pw;
   const yScale = (y) => mT + ((maxY - y) / (maxY - minY)) * ph;
   const zeroY = yScale(0);
-
-  const path = `M ${xScale(points[0][0])},${zeroY} ` +
-    points.map(([x, y]) => `L ${xScale(x)},${yScale(y)}`).join(" ") +
-    ` L ${xScale(points[points.length - 1][0])},${zeroY} Z`;
-  const linePath = `M ` + points.map(([x, y]) => `${xScale(x)},${yScale(y)}`).join(" L ");
   const zeroFrac = ((maxY - 0) / (maxY - minY)) * 100;
 
-  const strikeLines = [...new Set(strikes)].map((k) =>
-    `<line x1="${xScale(k)}" y1="${mT}" x2="${xScale(k)}" y2="${mT + ph}" class="strike-line"/>
-     <text x="${xScale(k)}" y="${H - 8}" class="axis-label" text-anchor="middle">${k}</text>`).join("");
-  const beMarks = breakevens.map((be) =>
-    `<circle cx="${xScale(be)}" cy="${zeroY}" r="3.5" class="be-dot"/>
-     <text x="${xScale(be)}" y="${zeroY - 8}" class="axis-label be-label" text-anchor="middle">${Math.round(be)}</text>`).join("");
-  const curSpotLine = SPOT != null && SPOT >= lo && SPOT <= hi
-    ? `<line x1="${xScale(SPOT)}" y1="${mT}" x2="${xScale(SPOT)}" y2="${mT + ph}" class="spot-line"/>
-       <text x="${xScale(SPOT)}" y="${mT + 10}" class="axis-label spot-label" text-anchor="middle">Spot</text>` : "";
+  const path = `M ${xScale(points[0][0])},${zeroY} ` + points.map(([x, y]) => `L ${xScale(x)},${yScale(y)}`).join(" ") +
+    ` L ${xScale(points[points.length - 1][0])},${zeroY} Z`;
+  const linePath = `M ` + points.map(([x, y]) => `${xScale(x)},${yScale(y)}`).join(" L ");
+  const todayPath = tPoints.length ? `M ` + tPoints.map(([x, y]) => `${xScale(x)},${yScale(y)}`).join(" L ") : "";
 
-  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="payoff-svg">
-    <defs><linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="var(--buy)" stop-opacity=".35"/>
-      <stop offset="${zeroFrac}%" stop-color="var(--buy)" stop-opacity=".08"/>
-      <stop offset="${zeroFrac}%" stop-color="var(--sell)" stop-opacity=".08"/>
-      <stop offset="100%" stop-color="var(--sell)" stop-opacity=".35"/>
-    </linearGradient></defs>
-    ${strikeLines}
+  // round-number grid: x every nice step (strikes), y every nice rupee step
+  const xStep = niceStep(hi - lo, Math.max(3, Math.floor(pw / 90)));
+  const xTicks = []; for (let v = Math.ceil(lo / xStep) * xStep; v <= hi; v += xStep) xTicks.push(v);
+  const yStep = niceStep(maxY - minY, Math.max(3, Math.floor(ph / 45)));
+  const yTicks = []; for (let v = Math.ceil(minY / yStep) * yStep; v <= maxY; v += yStep) yTicks.push(Math.round(v));
+  const grid = xTicks.map((v) => `<line x1="${xScale(v)}" y1="${mT}" x2="${xScale(v)}" y2="${mT + ph}" class="grid-line"/>
+      <text x="${xScale(v)}" y="${H - 6}" class="axis-label" text-anchor="${xScale(v) > W - 28 ? "end" : "middle"}">${v.toLocaleString("en-IN")}</text>`).join("") +
+    yTicks.map((v) => `<line x1="${mL}" y1="${yScale(v)}" x2="${mL + pw}" y2="${yScale(v)}" class="grid-line"/>
+      <text x="${mL - 6}" y="${yScale(v) + 4}" class="axis-label" text-anchor="end">${compact(v)}</text>`).join("");
+  const sdMarks = sdPts ? [-2, -1, 1, 2].map((k) => [k, S0 + k * sdPts]).filter(([, x]) => x > lo && x < hi).map(([k, x]) =>
+    `<line x1="${xScale(x)}" y1="${mT}" x2="${xScale(x)}" y2="${mT + ph}" class="sd-line"/>
+     <text x="${xScale(x)}" y="${mT - 4}" class="axis-label sd-label" text-anchor="middle">${k > 0 ? "+" : ""}${k}SD</text>`).join("") : "";
+  const beMarks = breakevens.map((be) => `<circle cx="${xScale(be)}" cy="${zeroY}" r="3.5" class="be-dot"/>`).join("");
+  const spotLine = S0 != null && S0 >= lo && S0 <= hi
+    ? `<line x1="${xScale(S0)}" y1="${mT}" x2="${xScale(S0)}" y2="${mT + ph}" class="spot-line"/>` : "";
+
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="payoff-svg" role="img" aria-label="Payoff chart">
+    <defs>
+      <linearGradient id="pnlGrad" gradientUnits="userSpaceOnUse" x1="0" y1="${mT}" x2="0" y2="${mT + ph}">
+        <stop offset="0%" stop-color="var(--buy)" stop-opacity=".22"/>
+        <stop offset="${zeroFrac}%" stop-color="var(--buy)" stop-opacity=".06"/>
+        <stop offset="${zeroFrac}%" stop-color="var(--sell)" stop-opacity=".06"/>
+        <stop offset="100%" stop-color="var(--sell)" stop-opacity=".22"/>
+      </linearGradient>
+      <linearGradient id="expGrad" gradientUnits="userSpaceOnUse" x1="0" y1="${mT}" x2="0" y2="${mT + ph}">
+        <stop offset="${zeroFrac}%" stop-color="var(--buy)"/><stop offset="${zeroFrac}%" stop-color="var(--sell)"/>
+      </linearGradient>
+    </defs>
+    ${grid}${sdMarks}
     <line x1="${mL}" y1="${zeroY}" x2="${mL + pw}" y2="${zeroY}" class="zero-line"/>
     <path d="${path}" fill="url(#pnlGrad)" stroke="none"/>
-    <path d="${linePath}" fill="none" class="payoff-line"/>
-    ${curSpotLine}
-    ${beMarks}
-    <text x="${mL - 6}" y="${yScale(maxY) + 4}" class="axis-label" text-anchor="end">${money(Math.round(maxY))}</text>
-    <text x="${mL - 6}" y="${yScale(minY) + 4}" class="axis-label" text-anchor="end">${money(Math.round(minY))}</text>
-  </svg>`;
+    <path d="${linePath}" fill="none" stroke="url(#expGrad)" class="expiry-line"/>
+    ${todayPath ? `<path d="${todayPath}" fill="none" class="today-line"/>` : ""}
+    ${spotLine}${beMarks}
+    <line id="pf-cross" x1="0" y1="${mT}" x2="0" y2="${mT + ph}" class="cross-line" visibility="hidden"/>
+    <circle id="pf-dot" r="4.5" class="cross-dot" visibility="hidden"/>
+    <circle id="pf-dot2" r="4" class="cross-dot today" visibility="hidden"/>
+  </svg>
+  <div class="chart-legend"><span class="lg exp"></span>On expiry${todayPath ? `<span class="lg today"></span>Today` : ""}</div>
+  ${S0 != null ? `<div class="chart-spot">Spot ${S0.toLocaleString("en-IN")}</div>` : ""}
+  <div id="pf-tip" class="pf-tip" hidden></div>`;
 
+  // hover: "when the price is at X (+y% from spot)" -> P&L today and at expiry, like Sensibull's tooltip
+  const svg = box.querySelector("svg"), tip = $("#pf-tip"), cross = $("#pf-cross"), dot = $("#pf-dot"), dot2 = $("#pf-dot2");
+  const hide = () => { tip.hidden = true; [cross, dot, dot2].forEach((e) => e.setAttribute("visibility", "hidden")); };
+  svg.addEventListener("pointerleave", hide);
+  svg.addEventListener("pointermove", (ev) => {
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) * (W / r.width);
+    if (px < mL || px > mL + pw) return hide();
+    const x = lo + ((px - mL) / pw) * (hi - lo), y = combinedPayoff(x, legs), cx = xScale(x);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", cx); dot.setAttribute("cy", yScale(y)); dot.setAttribute("visibility", "visible");
+    dot.setAttribute("class", `cross-dot ${y >= 0 ? "pos" : "neg"}`);
+    const yt = today ? todayPnl(x) : null;
+    if (yt != null) { dot2.setAttribute("cx", cx); dot2.setAttribute("cy", yScale(yt)); dot2.setAttribute("visibility", "visible"); }
+    const pct = S0 ? ` <span class="${x >= S0 ? "pos" : "neg"}">${x >= S0 ? "+" : ""}${((x - S0) / S0 * 100).toFixed(1)}% (${x >= S0 ? "+" : ""}${Math.round(x - S0)})</span>` : "";
+    tip.innerHTML = `<div class="pf-tip-h">When price is at</div><div class="pf-tip-x">${Math.round(x).toLocaleString("en-IN")}${pct}</div>
+      ${yt != null ? `<div class="pf-tip-row">Today <b class="${yt >= 0 ? "pos" : "neg"}">${money(Math.round(yt))}</b></div>` : ""}
+      <div class="pf-tip-row">On expiry <b class="${y >= 0 ? "pos" : "neg"}">${money(Math.round(y))}</b></div>`;
+    tip.hidden = false;
+    const bx = box.getBoundingClientRect(), mx = ev.clientX - bx.left, my = ev.clientY - bx.top;
+    tip.style.left = `${mx + 14 + tip.offsetWidth > bx.width ? mx - 14 - tip.offsetWidth : mx + 14}px`;
+    tip.style.top = `${Math.max(4, Math.min(bx.height - tip.offsetHeight - 4, my - tip.offsetHeight / 2))}px`;
+  });
+
+  // -- headline numbers ---------------------------------------------------------------------------------
   const slopes = tailSlopes(legs);
-  const maxProfit = slopes.right > 0 ? "Unlimited" : money(Math.round(maxY));
-  const maxLoss = (slopes.right < 0 || slopes.left < 0) ? "Unlimited" : money(Math.round(minY));
-  const beText = breakevens.length ? breakevens.map((b) => Math.round(b)).join(" / ") : "none in range";
-  const netPremium = legs.reduce((s, l) => s + (l.entry_price || 0) * l.lots * (l.lot_size || 1) * (l.side === "SELL" ? 1 : -1), 0);
-  stats.innerHTML = `<div>Max profit (at expiry) <output class="pos">${maxProfit}</output></div>
-    <div>Max loss (at expiry) <output class="neg">${maxLoss}</output></div>
-    <div>Breakeven <output>${beText}</output></div>
-    <div>Net premium <output class="${netPremium >= 0 ? "pos" : "neg"}">${money(Math.round(netPremium))} ${netPremium >= 0 ? "credit" : "debit"}</output></div>`;
+  const expY = points.map((p) => p[1]);
+  const maxP = Math.max(...expY), maxL = Math.min(...expY);
+  const unlimitedP = slopes.right > 0, unlimitedL = slopes.right < 0 || slopes.left < 0;
+  const ofMargin = (v) => (MARGIN.margin ? ` <small>(${v >= 0 ? "+" : ""}${Math.round(v / MARGIN.margin * 100)}%)</small>` : "");
+  const beText = breakevens.length ? breakevens.map((b) =>
+    `${Math.round(b)}${S0 ? ` <small class="${b >= S0 ? "pos" : "neg"}">(${b >= S0 ? "+" : ""}${((b - S0) / S0 * 100).toFixed(1)}%)</small>` : ""}`).join(", ") : "none in range";
+  const rr = !unlimitedP && !unlimitedL && maxL < 0 ? (maxP / -maxL).toFixed(2) : "–";
+  stats.innerHTML = `<div>Max profit <output class="pos">${unlimitedP ? "Unlimited" : `+${money(Math.round(maxP))}${ofMargin(maxP)}`}</output></div>
+    <div>Max loss <output class="neg">${unlimitedL ? "Unlimited" : `${money(Math.round(maxL))}${ofMargin(maxL)}`}</output></div>
+    <div class="wide">Breakeven <output>${beText}</output></div>
+    <div title="Zerodha margin for these legs together (hedge benefit included)">Margin needed <output>${MARGIN.margin ? `₹${compact(MARGIN.margin)}` : "–"}</output></div>
+    <div title="Max profit ÷ max loss at expiry">Reward / risk <output>${rr}</output></div>`;
 
   // Separate from the expiry curve above: what you'd actually realise if every leg's OWN configured SL /
   // TP triggers (this is how positions actually close in this app - almost never held to expiry).
@@ -454,30 +579,48 @@ function renderPayoff() {
   $("#payoff-sltp").innerHTML = (withSL.length || withTP.length) ? `
     <div>If SL hit <output class="neg">${withSL.length ? money(Math.round(slSum)) : "–"}</output>${slNote}</div>
     <div>If TP hit <output class="pos">${withTP.length ? money(Math.round(tpSum)) : "–"}</output>${tpNote}</div>` :
-    `<p class="hint small">No leg has an SL or TP set - nothing to show here (per-leg SL/TP is optional).</p>`;
+    "";                                                   // no per-leg SL/TP: nothing to show, take no space
+  fetchMargin(legs);
 }
 
-function renderSummaries() {
-  $("#leg-summaries").innerHTML = LEGS.map((l) => {
-    const qty = l.lots;
-    return `<div class="leg-summary"><b class="${l.side}">${l.side}</b> ${esc(l.option_type)} • ${esc(l.underlying)}
-      • Strike ${l.strike}${l.strike === atmStrike() ? " (ATM)" : ""} • Lots ${qty}
-      • SL ${l.sl_value ?? "auto (wide)"}${l.sl_value != null ? (l.sl_type === "PERCENT" ? "%" : l.sl_type === "PRICE" ? " (price)" : "pts") : ""}
-      • TP ${l.tp_value ?? "off"}${l.tp_value != null ? (l.tp_type === "PERCENT" ? "%" : l.tp_type === "PRICE" ? " (price)" : "pts") : ""}</div>`;
-  }).join("");
+// Zerodha margin for the checked legs (hedge benefit included): refetched only when the structure changes
+// (strikes / sides / lots / expiry / order type), not on every price tick.
+let marginTimer = 0;
+function fetchMargin(legs) {
+  const cfg = collectConfig();
+  const key = JSON.stringify([cfg.order_type, legs.map((l) => [l.underlying, l.expiry, l.strike, l.option_type, l.side, l.lots])]);
+  if (key === MARGIN.key) return;
+  MARGIN = {key, margin: null, charges: null};
+  clearTimeout(marginTimer);
+  marginTimer = setTimeout(async () => {
+    try {
+      const r = await api("/api/strategies/margin", {config: cfg, legs: legs.map((l) => ({underlying: l.underlying,
+        expiry: l.expiry, strike: l.strike, option_type: l.option_type, side: l.side, lots: l.lots, entry_price: l.entry_price}))});
+      if (MARGIN.key !== key) return;                     // the legs changed meanwhile
+      MARGIN = {key, margin: r.margin, charges: r.charges};
+      renderPayoff(); renderCalc();
+    } catch (e) { /* no margin shown */ }
+  }, 500);
 }
 
 function renderCalc() {
-  const priced = LEGS.filter((l) => l.entry_price != null);
+  const priced = LEGS.filter((l) => l.checked && l.entry_price != null);
   if (!priced.length) {
     $("#calc-price-get").textContent = "–"; $("#calc-premium-get").textContent = "–"; $("#calc-charges").textContent = "–";
     return;
   }
-  const net = LEGS.reduce((s, l) => s + (l.entry_price || 0) * l.lots * (l.side === "SELL" ? 1 : -1), 0);
-  const lotSum = LEGS.reduce((s, l) => s + l.lots, 0);
-  $("#calc-price-get").textContent = priced.map((l) => num(l.entry_price)).join(" / ");
-  $("#calc-premium-get").textContent = money(net);
-  $("#calc-charges").textContent = money(lotSum * 40);   // rough estimate only, not a broker figure
+  // like Sensibull: price get = net credit (+) / debit (-) per unit of the structure, premium get = in rupees
+  const minLots = Math.min(...priced.map((l) => l.lots || 1));
+  const sign = (l) => (l.side === "SELL" ? 1 : -1);
+  const perUnit = priced.reduce((s, l) => s + sign(l) * l.entry_price * (l.lots / minLots), 0);
+  const premium = priced.reduce((s, l) => s + sign(l) * l.entry_price * l.lots * (l.lot_size || 1), 0);
+  const lotSum = priced.reduce((s, l) => s + l.lots, 0);
+  $("#calc-price-get").textContent = perUnit.toFixed(2);
+  $("#calc-price-get").className = perUnit >= 0 ? "pos" : "neg";
+  $("#calc-premium-get").textContent = money(Math.round(premium));
+  $("#calc-premium-get").className = premium >= 0 ? "pos" : "neg";
+  $("#calc-charges").textContent = MARGIN.charges != null ? money(Math.round(MARGIN.charges)) : `~${money(lotSum * 40)}`;
+  $("#calc-charges").title = MARGIN.charges != null ? "Zerodha's estimate for these orders" : "rough estimate (₹40 per lot)";
 }
 
 $("#leg-tbody").addEventListener("click", (ev) => {
@@ -487,19 +630,7 @@ $("#leg-tbody").addEventListener("click", (ev) => {
   const act = ev.target.dataset.act;
   if (!leg || !act) return;
   if (act === "del") return removeLeg(id);
-  if (act === "side") {
-    leg.side = leg.side === "BUY" ? "SELL" : "BUY";
-    // A stop-loss / target typed as a PRICE is side-specific (BUY: SL below entry; SELL: above): flip it to
-    // the other side of the entry, same distance, so B -> S never leaves a stop on the wrong side.
-    const e = Number(leg.entry_price);
-    for (const [v, t] of [["sl_value", "sl_type"], ["tp_value", "tp_type"]]) {
-      if (leg[t] === "PRICE" && leg[v] != null && e > 0) {
-        const flipped = Math.round((2 * e - Number(leg[v])) * 100) / 100;
-        leg[v] = flipped > 0 ? flipped : null;
-      }
-    }
-    return renderLegs();
-  }
+  if (act === "side") { flipSide(leg); return renderLegs(); }
   if (act === "type") {
     leg.option_type = leg.option_type === "CE" ? "PE" : "CE";
     renderLegs(); fetchLegPrice(leg);
@@ -666,11 +797,43 @@ function applyTemplate(kind) {
     add({side: "SELL", option_type: "PE", strike: atm, leg_role: "SHORT_PE"});
     add({side: "SELL", option_type: "CE", strike: atm, leg_role: "SHORT_CE"});
     add({side: "BUY", option_type: "CE", strike: atm + 4 * step, leg_role: "LONG_CE_WING"});
+  } else if (kind === "long_straddle") {                 // volatility: profits on a big move either way
+    add({side: "BUY", option_type: "CE", strike: atm});
+    add({side: "BUY", option_type: "PE", strike: atm});
+  } else if (kind === "long_strangle") {
+    add({side: "BUY", option_type: "CE", strike: atm + 2 * step});
+    add({side: "BUY", option_type: "PE", strike: atm - 2 * step});
+  } else if (kind === "long_iron_condor") {              // reverse iron condor: debit, profits outside the body
+    add({side: "SELL", option_type: "PE", strike: atm - 6 * step});
+    add({side: "BUY", option_type: "PE", strike: atm - 2 * step});
+    add({side: "BUY", option_type: "CE", strike: atm + 2 * step});
+    add({side: "SELL", option_type: "CE", strike: atm + 6 * step});
+  } else if (kind === "long_iron_fly") {                 // reverse iron fly
+    add({side: "SELL", option_type: "PE", strike: atm - 4 * step});
+    add({side: "BUY", option_type: "PE", strike: atm});
+    add({side: "BUY", option_type: "CE", strike: atm});
+    add({side: "SELL", option_type: "CE", strike: atm + 4 * step});
+  } else if (kind === "bull_call_spread") {              // bullish, debit
+    add({side: "BUY", option_type: "CE", strike: atm});
+    add({side: "SELL", option_type: "CE", strike: atm + 4 * step});
+  } else if (kind === "bull_put_spread") {               // bullish, credit
+    add({side: "BUY", option_type: "PE", strike: atm - 4 * step});
+    add({side: "SELL", option_type: "PE", strike: atm});
+  } else if (kind === "bear_put_spread") {               // bearish, debit
+    add({side: "BUY", option_type: "PE", strike: atm});
+    add({side: "SELL", option_type: "PE", strike: atm - 4 * step});
+  } else if (kind === "bear_call_spread") {              // bearish, credit
+    add({side: "BUY", option_type: "CE", strike: atm + 4 * step});
+    add({side: "SELL", option_type: "CE", strike: atm});
   }
   renderLegs();
   LEGS.forEach(fetchLegPrice);
 }
-$$(".tmpl-btn").forEach((b) => b.addEventListener("click", () => applyTemplate(b.dataset.tmpl)));
+$("#tmpl-select").addEventListener("change", (e) => {
+  const v = e.target.value;
+  e.target.value = "";                                   // a picker, not a setting: back to "Templates…"
+  if (v) applyTemplate(v);
+});
 
 // ---------------------------------------------------------------- config collection
 function collectConfig() {
@@ -757,12 +920,15 @@ function confirmOrders(active) {
         <th>Price <button type="button" class="spin-btn" data-reset-ltp title="Reset LTP for every leg">↻</button></th><th>Order</th></tr>
       ${rows.map((r, i) => `<tr data-row="${i}">
         <td class="drag-handle" data-drag="${i}" title="Drag to re-arrange" aria-label="Drag to re-arrange">⠿</td>
-        <td>${i + 1}</td><td class="${r.leg.side}">${r.leg.side} ${r.leg.option_type}</td>
+        <td>${i + 1}</td>
+        <td><button type="button" class="bs-btn ${r.leg.side === "BUY" ? "buy" : "sell"}" data-flip="${i}"
+          title="Switch BUY / SELL">${r.leg.side === "BUY" ? "B" : "S"}</button>
+          <span class="bs-btn ${r.leg.option_type === "CE" ? "ce" : "pe"} tag">${r.leg.option_type}</span></td>
         <td>${esc(r.leg.underlying)} ${r.leg.strike}</td><td>${r.leg.lots}</td>
         <td><select data-type="${i}"><option value="LIMIT"${r.type === "LIMIT" ? " selected" : ""}>Limit</option>
           <option value="MARKET"${r.type === "MARKET" ? " selected" : ""}>Market</option></select></td>
         <td>${r.type === "LIMIT" ? `<input type="number" step="any" min="0" data-price="${i}" value="${r.price ?? ""}" required>`
-          : `<span class="hint small">at market</span>`}</td>
+          : `<input type="text" value="" placeholder="at market" disabled aria-label="Market price">`}</td>
         <td><button type="button" data-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
           <button type="button" data-down="${i}" ${i === rows.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button></td>
       </tr>`).join("")}</table>
@@ -775,6 +941,13 @@ function confirmOrders(active) {
       const b = e.target.closest("button");
       if (!b) return;
       if (b.dataset.all) rows.forEach((r) => { r.type = b.dataset.all; });
+      if (b.dataset.flip !== undefined) {               // B <-> S, the same as the builder row (kept in sync)
+        flipSide(rows[Number(b.dataset.flip)].leg);
+        const sides = new Set(rows.map((r) => r.leg.side));
+        if (sides.size === 1) { const sd = [...sides][0]; okButton(sd === "BUY" ? "Buy" : "Sell", sd); }
+        else okButton("Place orders");
+        renderLegs();
+      }
       if (b.dataset.resetLtp !== undefined) {           // every Limit price <- the contract's live price
         b.classList.add("spinning");
         Promise.all(rows.map(async (r) => {
@@ -1040,7 +1213,7 @@ async function exitLeg(tid) {
 
 // Add lots to a running leg (into the SAME leg: one position at the average price, SL resized), or re-enter a
 // closed one (a new leg of this strategy, either side via the toggle, with its own SL / target).
-async function addLeg(tid, reenter) {
+async function addToLeg(tid, reenter) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
     const tick = Number(t.tick_size) || 0.05;
@@ -1199,9 +1372,9 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   const id = ev.target.dataset.exit;
   if (id) return exitStrategy(Number(id));
   const aid = ev.target.dataset.legAdd;
-  if (aid) return addLeg(Number(aid), false);
+  if (aid) return addToLeg(Number(aid), false);
   const rid = ev.target.dataset.legReenter;
-  if (rid) return addLeg(Number(rid), true);
+  if (rid) return addToLeg(Number(rid), true);
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
   const cid = ev.target.dataset.legCancel;
@@ -1246,8 +1419,77 @@ loadMeta().then(() => {
   .finally(() => { $("#page-loading").classList.add("hidden"); });
 // No polling: the server pushes "dashboard" when any trade/order state changes; LTP / P&L cells are patched
 // in place by live.js on every tick. The slow refresh is only a safety net.
-Live.onPrice((k, px) => { if (k === $("#base-spot").dataset.price) SPOT = px; });
+Live.onPrice((k, px) => { if (k === $("#base-spot").dataset.price) { SPOT = px; renderSpotChange(); } });
 Live.onDashboard(refreshStrategies);
 Live.start();
 refreshStrategies();
 setInterval(refreshStrategies, 30000);
+
+
+// -- layout: settings drawer, one-screen workspace, resizable summary rail, chart that fills its space ------------
+{
+  const drawer = $("#config-panel"), scrim = $("#drawer-scrim"), openBtn = $("#settings-open");
+  const setDrawer = (open) => {
+    drawer.classList.toggle("open", open);
+    drawer.setAttribute("aria-hidden", String(!open));
+    openBtn.setAttribute("aria-expanded", String(open));
+    scrim.hidden = !open;
+    if (open) $("#settings-close").focus(); else openBtn.focus();
+  };
+  openBtn.onclick = () => setDrawer(true);
+  $("#settings-close").onclick = () => setDrawer(false);
+  scrim.onclick = () => setDrawer(false);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer.classList.contains("open")) setDrawer(false); });
+  // the top-bar button shows the settings that matter at a glance: order type + square-off time
+  const chip = () => {
+    const ot = $("input[name=order_type]:checked")?.value || "";
+    const sq = $("#cfg-square-off").value;
+    $("#settings-chip").textContent = [ot, sq && `sq-off ${sq}`].filter(Boolean).join(" · ");
+  };
+  drawer.addEventListener("change", chip);
+  drawer.addEventListener("input", chip);
+  chip();
+  setTimeout(chip, 0);                                   // after the remembered settings are restored
+
+  // workspace height = the screen below the banner + top bar
+  const ws = $("#workspace");
+  const fit = () => document.documentElement.style.setProperty("--ws-top", `${ws.getBoundingClientRect().top + window.scrollY}px`);
+  fit();
+  window.addEventListener("resize", fit);
+  new ResizeObserver(fit).observe($("#banner"));
+
+  // summary rail width: drag the handle (or ←/→ when it has focus); remembered
+  const KEY = "trader:strategy:rail-w", MIN = 320, MAX = () => Math.max(MIN, Math.min(820, window.innerWidth - 820));   // the legs table keeps ~800px
+  const setW = (w) => {
+    const v = Math.round(Math.max(MIN, Math.min(MAX(), w)));
+    document.documentElement.style.setProperty("--rail-w", `${v}px`);
+    try { localStorage.setItem(KEY, String(v)); } catch (e) { /* ignore */ }
+  };
+  try { const w = Number(localStorage.getItem(KEY)); if (w) setW(w); } catch (e) { /* ignore */ }
+  const handle = $("#rail-resizer"), rail = $("#summary-rail");
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add("dragging");
+    const right = ws.getBoundingClientRect().right;
+    const move = (ev) => setW(right - ev.clientX - 4);
+    const up = () => { handle.classList.remove("dragging"); handle.removeEventListener("pointermove", move); };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up, {once: true});
+  });
+  handle.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 60 : 20;
+    if (e.key === "ArrowLeft") { setW(rail.offsetWidth + step); e.preventDefault(); }
+    if (e.key === "ArrowRight") { setW(rail.offsetWidth - step); e.preventDefault(); }
+  });
+
+  // redraw the payoff chart when its box changes size (rail drag, window resize)
+  let raf = 0, last = "";
+  new ResizeObserver(([e]) => {
+    const k = `${Math.round(e.contentRect.width)}x${Math.round(e.contentRect.height)}`;
+    if (k === last) return;
+    last = k;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(renderPayoff);
+  }).observe($("#payoff-chart"));
+}

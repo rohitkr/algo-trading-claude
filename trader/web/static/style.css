@@ -87,3 +87,8 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 #dlg-ok.ok-sell { background: var(--sell); border-color: var(--sell); color: #fff; }
 .ltp-fill { padding: 0 6px; margin-left: 4px; line-height: 1.4; font-size: 12px; background: transparent; color: var(--paper); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
 .ltp-fill:disabled { opacity: .5; }
+
+/* every dropdown: own chevron with room on the right (the native arrow sat on the border) */
+select { -webkit-appearance: none; appearance: none; padding-right: 28px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }

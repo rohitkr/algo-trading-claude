@@ -410,6 +410,42 @@ class StrategyService:
                 self.svc.audit(t["id"], "EXIT_TRIGGERED", "WARNING", {"reason": reason, "strategy_id": s["id"]})
         self.repo.update_strategy(s["id"], status="DONE", exit_reason=reason, exit_time=self.repo.now())
 
+    # -- margin needed for a strategy before placing it (display only) ---------------------------------
+    def margin(self, payload: dict) -> dict:
+        """Margin Zerodha needs for these legs together (hedge benefit included) and its charges estimate, from
+        Kite's basket-margin API (svc.margin_fn, wired in app.py). Display only: never gates an order."""
+        fn = getattr(self.svc, "margin_fn", None)
+        if fn is None:
+            return {"margin": None, "charges": None, "error": "margin needs a Kite login"}
+        try:
+            cfg = GlobalConfig.from_json(payload.get("config") or {})
+            orders = []
+            for leg in payload.get("legs") or []:
+                inst = self.svc.instruments.resolve(str(leg.get("underlying") or "").upper(),
+                                                    date.fromisoformat(str(leg.get("expiry"))),
+                                                    float(leg["strike"]), str(leg.get("option_type") or "").upper())
+                lots = int(leg.get("lots") or 1)
+                units = (self.svc.instruments.units_per_lot(inst.exchange, inst.tradingsymbol)
+                         if inst.exchange == "MCX" else None)
+                orders.append({"exchange": inst.exchange, "tradingsymbol": inst.tradingsymbol,
+                               "transaction_type": str(leg.get("side") or "BUY").upper(), "variety": "regular",
+                               "product": _product_for(cfg.order_type), "order_type": "LIMIT",
+                               "quantity": lots if units else lots * inst.lot_size,
+                               "price": float(leg.get("entry_price") or 0), "trigger_price": 0})
+        except (KeyError, ValueError, TypeError, ActionError) as exc:
+            return {"margin": None, "charges": None, "error": str(exc)}
+        if not orders:
+            return {"margin": None, "charges": None}
+        try:
+            r = fn(orders) or {}
+        except Exception as exc:
+            return {"margin": None, "charges": None, "error": f"Kite: {exc}"}
+        total = (r.get("final") or {}).get("total")
+        charges = sum(float((o.get("charges") or {}).get("total") or 0) for o in r.get("orders") or []) or None
+        return {"margin": round(float(total), 2) if total is not None else None,
+                "margin_before_hedge": (r.get("initial") or {}).get("total"),
+                "charges": round(charges, 2) if charges else None}
+
     # -- combined max loss / max profit of a placed strategy ----------------------------------------
     def set_exits(self, strategy_id: int, payload: dict) -> dict:
         """Change a strategy's combined max loss / max profit (blank = off). Applies from the next tick: if the

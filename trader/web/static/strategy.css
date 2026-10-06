@@ -44,15 +44,53 @@ body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); c
 .navlink:hover { color: var(--fg); }
 #theme-toggle { background: var(--card2); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
 
-main { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,2.2fr); gap: 16px; padding: 16px 20px; align-items: start; }
-@media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
-.panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; min-width: 0; }
-.panel.wide { grid-column: span 1; }
-/* #strategies-panel only: grid auto-placement was dropping it into the NARROW left column (row 2, since
-   config-panel + legs-panel already fill row 1's two tracks) - it needs the full row's width explicitly,
-   which .panel.wide's plain "span 1" never gave it. legs-panel is left exactly as it was: it already lands
-   in the wide right-hand track through ordinary auto-placement. */
-#strategies-panel { grid-column: 1 / -1; }
+main { display: flex; flex-direction: column; gap: 14px; padding: 12px 16px 20px; }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+
+/* -- workspace: everything needed to build + place a strategy on ONE screen ---------------------------------
+   builder (instrument, expiry/multiplier/max loss/max profit, legs) | drag handle | summary rail (numbers,
+   payoff chart, Trade all - always visible). Height = the viewport below the banner/top bar (--ws-top is set
+   by strategy.js); each side scrolls on its own if it overflows. The rail's width is draggable and remembered. */
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--rail-w, 420px);
+  height: max(560px, calc(100vh - var(--ws-top, 120px) - 12px)); }
+.builder { overflow: auto; display: flex; flex-direction: column; }
+.rail { display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.rail-resizer { cursor: col-resize; position: relative; }
+.rail-resizer::after { content: ""; position: absolute; inset: 30% 3px; border-radius: 2px; background: var(--line); }
+.rail-resizer:hover::after, .rail-resizer.dragging::after, .rail-resizer:focus-visible::after { background: var(--accent); }
+.rail .payoff-block { flex: 1; min-height: 140px; display: flex; flex-direction: column; margin: 0; padding: 0; border: 0; }
+.rail #payoff-chart { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.rail .payoff-svg { position: absolute; inset: 4px; width: calc(100% - 8px); height: calc(100% - 8px); }
+.rail .action-row { margin-top: 0; padding-top: 10px; border-top: 1px solid var(--line); }
+.rail .action-row .primary { padding: 12px 16px; font-size: 15px; }
+/* key numbers: max profit / max loss / breakeven / net premium, big and first */
+.stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; font-size: 11px; color: var(--muted); }
+.stats-grid > div { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.stats-grid output { display: block; margin-top: 2px; font-size: 16px; font-weight: 700; color: var(--fg); overflow-wrap: anywhere; }
+.stats-grid output.pos { color: var(--buy); } .stats-grid output.neg { color: var(--sell); }
+.rail .calc-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.rail .calc-row output { font-size: 14px; font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
+.rail .payoff-sltp { margin-top: 0; padding: 8px 10px; }
+/* narrow screens: stack; Trade all sticks to the bottom of the screen */
+@media (max-width: 1100px) {
+  .workspace { grid-template-columns: 1fr; height: auto; gap: 14px; }
+  .rail-resizer { display: none; }
+  .builder, .rail { overflow: visible; }
+  .rail .payoff-block { min-height: 240px; }
+  .rail #payoff-chart { min-height: 220px; }
+  .rail .action-row { position: sticky; bottom: 0; background: var(--card); padding-bottom: 6px; z-index: 3; }
+}
+
+/* -- global configuration: a drawer from the left (rarely changed), opened from the top bar --------------- */
+.drawer { position: fixed; top: 0; bottom: 0; left: 0; width: min(420px, 92vw); z-index: 40; overflow: auto;
+  border-radius: 0 10px 10px 0; transform: translateX(-102%); transition: transform .18s ease; box-shadow: 0 0 40px rgba(0,0,0,.35); }
+.drawer.open { transform: none; }
+.drawer-scrim { position: fixed; inset: 0; z-index: 39; background: rgba(0,0,0,.35); }
+.drawer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.drawer-head h2 { margin: 0; }
+.icon-btn { padding: 4px 9px; }
+.settings-btn { padding: 6px 12px; display: inline-flex; align-items: center; gap: 8px; }
+.settings-chip { font-size: 11px; color: var(--muted); font-weight: 600; }
 h2 { margin: 0 0 12px; font-size: 15px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 
@@ -96,6 +134,7 @@ output { font-weight: 700; }
 /* instrument picker sits in the spot bar (left); the spot price is on the right */
 .spot-panel .spot-instrument { width: auto; min-width: 130px; font-weight: 700; }
 .spot-panel .spot-value { text-align: right; }
+.spot-panel .tmpl-select { width: auto; min-width: 150px; color: var(--muted); }
 /* expiry · lot multiplier · max loss · max profit in one row (wraps on narrow screens) */
 .base-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 720px) { .base-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -154,19 +193,20 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .drag-handle { touch-action: none; }
 .leg-table .price-cell input { width: 66px; }
 .leg-table .slp-cell { display: flex; gap: 3px; }
-.leg-table .slp-cell input { width: 52px; } .leg-table .slp-cell select { width: 78px; }
+.leg-table .slp-cell input { width: 52px; } .leg-table .slp-cell select { width: 90px; }
 .bs-btn { width: 30px; height: 28px; padding: 0; border-radius: 5px; border: none; font-weight: 800;
   line-height: 28px; cursor: pointer; color: #fff; text-align: center; }
-.bs-btn.buy { background: var(--buy-blue); } .bs-btn.sell { background: var(--sell-orange); }
+/* soft, Sensibull-style: tinted background + coloured letter (B blue, S red); CE/PE neutral */
+.bs-btn.buy { background: rgba(47, 111, 237, .16); color: #6c9cff; box-shadow: inset 0 0 0 1px rgba(47, 111, 237, .35); }
+.bs-btn.sell { background: rgba(239, 68, 68, .14); color: #f37b7b; box-shadow: inset 0 0 0 1px rgba(239, 68, 68, .35); }
+:root[data-theme="light"] .bs-btn.buy { background: #e8f0ff; color: #2459d4; box-shadow: inset 0 0 0 1px #c9d9fb; }
+:root[data-theme="light"] .bs-btn.sell { background: #fdecec; color: #c0262d; box-shadow: inset 0 0 0 1px #f6cfcf; }
 .bs-btn.ce, .bs-btn.pe { width: 36px; font-size: 12px; }
-.bs-btn.ce { background: var(--ce-color); } .bs-btn.pe { background: var(--pe-color); }
+.bs-btn.ce, .bs-btn.pe { background: var(--card2); color: var(--fg); font-weight: 600; box-shadow: inset 0 0 0 1px var(--line); }
 .leg-del { background: none; border: none; color: var(--sell); font-size: 16px; cursor: pointer; padding: 2px 6px; }
 .leg-check { accent-color: var(--accent); }
 
 #add-leg { margin: 10px 0 4px; background: var(--card2); border: 1px dashed var(--line); color: var(--fg); border-radius: 6px; padding: 8px 14px; cursor: pointer; }
-.leg-summaries { margin: 10px 0; display: flex; flex-direction: column; gap: 4px; }
-.leg-summary { font-size: 12px; color: var(--muted); padding: 4px 8px; border-radius: 5px; background: var(--card2); }
-.leg-summary b.BUY { color: var(--buy); } .leg-summary b.SELL { color: var(--sell); }
 
 .calc-row { margin: 10px 0; font-size: 12px; color: var(--muted); }
 .calc-row output { display: block; margin-top: 2px; font-size: 15px; }
@@ -180,7 +220,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .strike-line { stroke: var(--line); stroke-width: 1; }
 .payoff-line { stroke: var(--accent); stroke-width: 2; }
 .spot-line { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 4 2; }
-.axis-label { fill: var(--muted); font-size: 9px; }
+.axis-label { fill: var(--muted); font-size: 11px; }
 .spot-label { fill: var(--warn); font-weight: 700; }
 .be-dot { fill: var(--fg); }
 .be-label { fill: var(--fg); font-weight: 700; }
@@ -291,3 +331,60 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 .order-all button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .live-tag { margin-left: 8px; font-size: 11px; font-weight: 700; color: #fff; background: var(--sell); border-radius: 4px; padding: 1px 6px; vertical-align: middle; }
 .order-confirm th .spin-btn { margin-left: 4px; }
+.builder #add-leg { align-self: flex-start; }
+.payoff-sltp:empty { display: none; }
+
+/* % change vs previous close, next to the spot */
+.spot-chg { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 4.5em; }
+/* order pop-up: coloured B/S (click to switch) + CE/PE tag, same look as the builder */
+.order-confirm .bs-btn { width: 28px; height: 26px; font-size: 12px; padding: 0; }
+.order-confirm .bs-btn.tag { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 22px;
+  margin-left: 4px; border-radius: 5px; color: #fff; font-weight: 700; font-size: 11px; cursor: default; }
+.order-confirm input[disabled] { opacity: .6; }
+.order-confirm td { height: 40px; }
+table.order-confirm input[type=text] { width: 90px; }
+
+/* payoff chart hover: crosshair, dot on the curve, tooltip */
+.cross-line { stroke: var(--fg); stroke-width: 1; stroke-dasharray: 3 3; opacity: .6; pointer-events: none; }
+.cross-dot { fill: var(--card); stroke-width: 2.5; pointer-events: none; }
+.cross-dot.pos { stroke: var(--buy); } .cross-dot.neg { stroke: var(--sell); }
+.payoff-svg { cursor: crosshair; }
+.pf-tip { position: absolute; z-index: 2; pointer-events: none; min-width: 170px; padding: 8px 10px; border-radius: 8px;
+  background: rgba(20, 22, 28, .94); color: #e6e8ec; border: 1px solid var(--line); font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+.pf-tip-h { color: #9aa0ae; font-size: 11px; }
+.pf-tip-x { font-size: 15px; font-weight: 700; margin: 2px 0 6px; font-variant-numeric: tabular-nums; }
+.pf-tip-row { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid rgba(255,255,255,.12); padding-top: 6px; }
+.pf-tip .pos { color: #4ade80; } .pf-tip .neg { color: #f87171; }
+.stats-grid small { font-size: 11px; font-weight: 600; }
+
+/* -- every dropdown: own chevron with room on the right (the native arrow sat on the border) ------------------ */
+select { -webkit-appearance: none; appearance: none; padding-right: 28px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+.leg-table select, table.order-confirm select, .history-bar select { padding-right: 26px; }
+select:hover { border-color: var(--muted); }
+select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -- summary rail: flat tiles (no box inside a box), numbers first -------------------------------------------- */
+.stats-grid output, .rail .calc-row output { border: 0; background: none; padding: 0; }
+.stats-grid > div.wide { grid-column: 1 / -1; }
+.stats-grid > div { padding: 10px 12px; }
+.stats-grid output { font-size: 17px; }
+.stats-grid output small { font-size: 12px; font-weight: 600; }
+.rail .calc-row > div { font-size: 11px; color: var(--muted); }
+.rail .calc-row output { display: block; margin-top: 2px; font-size: 15px; font-weight: 700; color: var(--fg); }
+.rail .calc-row output.pos { color: var(--buy); } .rail .calc-row output.neg { color: var(--sell); }
+
+/* -- payoff chart ---------------------------------------------------------------------------------------- */
+.grid-line { stroke: var(--line); stroke-width: 1; opacity: .7; }
+.sd-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 4; opacity: .6; }
+.sd-label { font-size: 10px; }
+.expiry-line { stroke-width: 2.2; }
+.today-line { stroke: #4f8cff; stroke-width: 2; }
+.cross-dot.today { stroke: #4f8cff; }
+.chart-legend { position: absolute; top: 6px; right: 10px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); pointer-events: none; }
+.chart-legend .lg { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-left: 8px; }
+.chart-legend .lg.exp { background: linear-gradient(90deg, var(--sell) 50%, var(--buy) 50%); }
+.chart-legend .lg.today { background: #4f8cff; }
+.chart-spot { position: absolute; top: 6px; left: 56px; font-size: 11px; font-weight: 700; color: var(--warn); pointer-events: none; }
+.chart-wait { padding: 12px; margin: 0; }
