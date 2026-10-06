@@ -24,16 +24,19 @@ def one_leg(tmp_path, **cfg):
     return r, strat, res["confirmed"][0], res["strategy_id"]
 
 
-def test_add_lots_to_a_running_leg(tmp_path):
-    r, strat, tid, sid = one_leg(tmp_path)
-    res = strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 100, "stop_loss": 90, "target": 130})
-    assert res["ok"], res
+def test_add_lots_goes_into_the_same_leg_at_the_average_price(tmp_path):
+    r, strat, tid, sid = one_leg(tmp_path)                 # BUY 2 lots (130) @ 100, SL 90
+    r.price(94)
+    res = strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 94})
+    assert res["ok"] and res["trade_id"] == tid, res
     r.tick(); r.tick()
-    new = r.trade(res["trade_id"])
-    assert new["group_id"] == sid and new["tradingsymbol"] == SYM and new["side"] == "BUY"
-    assert new["status"] == L.POSITION_ACTIVE and new["quantity"] == 65
-    assert r.trade(tid)["status"] == L.POSITION_ACTIVE and r.trade(tid)["mismatch_count"] == 0
-    assert len(strat.view(sid)["legs"]) == 2
+    t = r.trade(tid)
+    assert len(strat.view(sid)["legs"]) == 1                # no new row
+    assert (t["status"], t["quantity"], t["lots"], t["filled_qty"], t["open_qty"]) == (L.POSITION_ACTIVE, 195, 3, 195, 195)
+    assert t["entry_avg_price"] == 98.0                     # (130 x 100 + 65 x 94) / 195
+    sl = [o for o in r.repo.orders(tid, "SL") if o["status"] not in ("CANCELLED", "COMPLETE")][-1]
+    assert sl["quantity"] == 195                            # the stop covers the whole position
+    assert t["mismatch_count"] == 0
 
 
 def test_re_enter_a_closed_leg_reopens_the_strategy(tmp_path):
@@ -53,11 +56,25 @@ def test_re_enter_a_closed_leg_reopens_the_strategy(tmp_path):
     assert not r.trade(res["trade_id"])["pending_exit_reason"]
 
 
-def test_refused_add_leaves_nothing_on_the_strategy(tmp_path):
+def test_refused_add_changes_nothing(tmp_path):
     r, strat, tid, sid = one_leg(tmp_path)
-    res = strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 100, "stop_loss": 110})
-    assert not res["ok"] and res["errors"]
-    assert len(strat.view(sid)["legs"]) == 1
+    res = strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": None})
+    assert not res["ok"] and "limit price" in res["errors"][0]
+    t = r.trade(tid)
+    assert (t["quantity"], t["lots"]) == (130, 2) and len(strat.view(sid)["legs"]) == 1
+
+
+def test_add_that_does_not_fill_leaves_the_position_as_it_was(tmp_path):
+    r, strat, tid, sid = one_leg(tmp_path)
+    r.ex.auto_match = False                                 # the add order rests unfilled
+    res = strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 80})
+    assert res["ok"] and r.trade(tid)["quantity"] == 195
+    add = r.repo.orders(tid, "ENTRY")[-1]
+    r.svc.placer.cancel(add, "test: cancelled")
+    for _ in range(3):
+        r.tick()
+    t = r.trade(tid)
+    assert (t["status"], t["quantity"], t["lots"], t["open_qty"]) == (L.POSITION_ACTIVE, 130, 2, 130)
 
 
 def test_re_enter_a_closed_leg_on_the_other_side(tmp_path):
@@ -77,3 +94,17 @@ def test_running_leg_cannot_be_added_to_on_the_other_side(tmp_path):
     res = strat.add_to_leg(tid, {"side": "SELL", "lots": 1, "price_type": "LIMIT", "entry_price": 100,
                                  "stop_loss": 110})
     assert not res["ok"] and "open as BUY" in res["errors"][0]
+
+
+def test_exit_while_an_add_is_resting_cancels_it_and_closes_what_is_held(tmp_path):
+    r, strat, tid, sid = one_leg(tmp_path)
+    r.ex.auto_match = False
+    assert strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 80})["ok"]
+    r.ex.auto_match = True
+    p = r.svc.prepare(tid, "EXIT")
+    r.svc.request_exit(tid, p["token"])
+    for _ in range(5):
+        r.tick()
+    t = r.trade(tid)
+    assert t["status"] == L.EXITED and t["exited_qty"] == 130 and t["open_qty"] == 0
+    assert r.repo.orders(tid, "ENTRY")[-1]["status"] == "CANCELLED"

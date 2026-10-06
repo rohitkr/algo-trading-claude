@@ -1038,8 +1038,8 @@ async function exitLeg(tid) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
-// Add lots to a running leg, or re-enter a closed one: same contract, a new leg of this strategy. Re-entering
-// can be either side (toggle at the top); adding to a running leg is always its own side.
+// Add lots to a running leg (into the SAME leg: one position at the average price, SL resized), or re-enter a
+// closed one (a new leg of this strategy, either side via the toggle, with its own SL / target).
 async function addLeg(tid, reenter) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
@@ -1054,16 +1054,18 @@ async function addLeg(tid, reenter) {
     const toggle = reenter ? `<div class="side-toggle" role="radiogroup" aria-label="Side">
         <button type="button" data-side="BUY" class="BUY">Buy</button><button type="button" data-side="SELL" class="SELL">Sell</button></div>` : "";
     const html = `${toggle}<div class="big-side ${esc(t.side)}" id="add-head">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
-      <p class="hint small">LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · lot size ${t.lot_size}${reenter ? "" :
-        ` · running ${Math.floor(t.open_qty / t.lot_size)} lot(s) @ ${num(ref)}`}. Placed as a new leg of this strategy with its own SL / target.</p>
+      <p class="hint small">LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · lot size ${t.lot_size}${reenter
+        ? ". Placed as a new leg of this strategy with its own SL / target."
+        : ` · holding ${Math.floor(t.open_qty / t.lot_size)} lot(s) @ ${num(ref)}. Added to this leg: quantity and average price
+           update, and SL ${num(t.current_sl)} / target ${t.target != null ? num(t.target) : "none"} cover all of it (change with Edit).`}</p>
       <div class="edit-leg-grid">
         <label>Lots <input id="add-lots" type="number" min="1" step="1" value="${reenter ? t.lots : 1}"></label>
         <label>Order <select id="add-type"><option value="LIMIT">Limit</option><option value="MARKET">Market</option></select></label>
         <label><span>Price ₹ ${ltpBtn("#add-price")}</span> <input id="add-price" type="number" step="any" min="0" value="${px}"></label>
-        <label>Stop-loss ₹ (blank = auto) <input id="add-sl" type="number" step="any" min="0" value="${sl ?? ""}"></label>
-        <label>Target ₹ (blank = none) <input id="add-tp" type="number" step="any" min="0" value="${tp}"></label>
+        ${reenter ? `<label>Stop-loss ₹ (blank = auto) <input id="add-sl" type="number" step="any" min="0" value="${sl ?? ""}"></label>
+        <label>Target ₹ (blank = none) <input id="add-tp" type="number" step="any" min="0" value="${tp}"></label>` : ""}
       </div>`;
-    const pending = dialog(reenter ? "Re-enter leg" : "Add to leg", html, MODE === "LIVE");
+    const pending = dialog(reenter ? "Re-enter leg" : `Add to leg #${t.id}`, html, MODE === "LIVE");
     const show = () => {
       $("#add-head").className = `big-side ${side}`;
       $("#add-head").textContent = `${side} ${t.tradingsymbol}`;
@@ -1087,7 +1089,7 @@ async function addLeg(tid, reenter) {
     wireLtpFill(t);
     $("#add-type").onchange = () => { $("#add-price").disabled = $("#add-type").value === "MARKET"; };
     if (!(await pending)) return;
-    const n = (id) => ($(id).value === "" ? null : toTick(Number($(id).value), tick));
+    const n = (id) => (!$(id) || $(id).value === "" ? null : toTick(Number($(id).value), tick));
     const what = `${side === "BUY" ? "Buy" : "Sell"} ${t.tradingsymbol}`;
     const r = await api(`/api/strategies/legs/${tid}/add`, {
       side, lots: Math.floor(Number($("#add-lots").value)) || 0, price_type: $("#add-type").value,

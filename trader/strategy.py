@@ -222,9 +222,9 @@ class StrategyService:
 
     # -- add lots to a leg / re-enter a closed leg (a new leg in the same strategy) -----------------------
     def add_to_leg(self, trade_id: int, payload: dict) -> dict:
-        """Place more of a leg's contract, same side, as a NEW leg of the same strategy (its own SL/target).
-        On a running leg this adds to the position; on a closed leg it re-enters it. A finished strategy is
-        reopened; its profit/loss/trail rules then count only P&L made after the re-entry."""
+        """Running leg: add lots to it (same leg, average price, SL resized; TradeService.add_to_position).
+        Closed leg: re-enter it, either side, as a NEW leg of the same strategy with its own SL/target. A finished
+        strategy is reopened; its profit/loss/trail rules then count only P&L made after the re-entry."""
         with self.svc.lock:
             t = self.repo.trade(trade_id)
             if t is None or t.get("group_id") is None:
@@ -238,6 +238,15 @@ class StrategyService:
             side = str(payload.get("side") or t["side"]).upper()
             if side != t["side"] and t["status"] in L.OPEN_STATUSES:
                 return {"ok": False, "errors": [f"this leg is open as {t['side']}: exit it, or add as {t['side']}"]}
+            if t["status"] in L.OPEN_STATUSES:
+                # a running leg: the lots go into the SAME leg (one position, average price), not a new row
+                try:
+                    res = self.svc.add_to_position(trade_id, int(payload.get("lots") or 0),
+                                                   str(payload.get("price_type") or "LIMIT"),
+                                                   _num(payload.get("entry_price")))
+                except ActionError as exc:
+                    return {"ok": False, "errors": [str(exc)]}
+                return {"ok": True, "trade_id": trade_id, "strategy_id": s["id"], "added": True}
             leg = dict(underlying=t["underlying"], expiry=t["expiry"], strike=t["strike"],
                        option_type=t["option_type"], side=side, lots=int(payload.get("lots") or 0),
                        price_type=payload.get("price_type") or "LIMIT", entry_price=payload.get("entry_price"),

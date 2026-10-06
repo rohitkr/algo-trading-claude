@@ -241,6 +241,51 @@ class TradeService:
                                  {"order_id": row["broker_order_id"]}, entry_order_id=row["broker_order_id"])
             return {"ok": True, "trade": self.trade_view(trade_id), "order_status": row["status"]}
 
+    def add_to_position(self, trade_id: int, lots: int, price_type: str, price: float | None) -> dict:
+        """Buy (BUY trade) / sell (SELL trade) more of a running position as part of the SAME trade: another
+        ENTRY order. The trade's quantity grows, its entry becomes the average fill, and its SL order is resized
+        to the whole open quantity on the next tick. The SL / target / trailing settings apply to all of it."""
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] not in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED) or t["pending_exit_reason"]:
+                raise ActionError(f"trade is {t['status']}{' (exiting)' if t['pending_exit_reason'] else ''}: "
+                                  "only a running position can be added to")
+            q = self._derive(t)
+            if any(is_working(o["status"]) for o in q["orders"] if o["kind"] == "ENTRY"):
+                raise ActionError("an earlier add is still working: wait for it to fill, or cancel it in Kite")
+            if lots < 1:
+                raise ActionError("lots must be 1 or more")
+            inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+            qty = lots * t["lot_size"]
+            freeze = self.cfg.freeze_for(t["underlying"])
+            if qty > freeze:
+                raise ActionError(f"{qty} units is above the {t['underlying']} freeze limit {freeze}")
+            if str(price_type).upper() == "MARKET":
+                ltp = self._ltp_safe(inst, max_age=self.cfg.quote_ttl_s)
+                if not ltp:
+                    raise ActionError("no live price for a Market order: use Limit with a price")
+                buf = self.cfg.exit_buffer_pct / 100
+                price = round_to_tick(ltp * (1 + buf if t["side"] == "BUY" else 1 - buf), t["tick_size"], t["side"])
+            else:
+                if not price or price <= 0:
+                    raise ActionError("a limit price is required")
+                price = round(round(price / t["tick_size"]) * t["tick_size"], 2)
+            try:
+                self.broker.snapshot(self.clock())
+            except Exception as exc:
+                self._broker_error("snapshot (add)", exc)
+                raise ActionError(f"cannot reach Zerodha: {exc}") from None
+            self.repo.update_trade(trade_id, quantity=t["quantity"] + qty, lots=t["lots"] + lots)
+            t.update(self.repo.trade(trade_id))
+            self.audit(trade_id, "POSITION_ADD", "INFO", {"lots": lots, "qty": qty, "price": price,
+                                                           "price_type": str(price_type).upper(),
+                                                           "open_before": q["open"], "avg_before": q["entry_avg"]})
+            row = self.placer.place(t, "ENTRY", t["side"], qty, "LIMIT", price, purpose="ADD")
+            if row is None:
+                raise ActionError("an entry order is already working for this trade")
+            self._tick_locked()
+            return {"ok": True, "trade": self.trade_view(trade_id), "order_status": row["status"]}
+
     def prepare(self, trade_id: int, action: str) -> dict:
         """Token + summary for a dangerous action (EXIT / CANCEL), shown in a confirmation dialog."""
         with self.lock:
@@ -626,13 +671,19 @@ class TradeService:
         entry_avg = entry_val / filled if filled else None
         d = L.direction(t["side"])
         realized = (d * (exit_val - exited * entry_avg) if filled and exited else 0.0) + (t["outside_pnl"] or 0)
-        return {"orders": orders, "entry": entries[-1] if entries else None, "filled": filled, "entry_avg": entry_avg,
+        # intended quantity of a position that was added to (several ENTRY orders): what is still working counts
+        # in full, a finished order counts only what it filled (an add that was rejected/cancelled adds nothing)
+        intended = sum(o["quantity"] if is_working(o["status"]) else o["filled_qty"] for o in entries)
+        return {"orders": orders, "entry": entries[-1] if entries else None, "entries": len(entries),
+                "intended": intended, "filled": filled, "entry_avg": entry_avg,
                 "exited": exited, "exit_avg": exit_val / exited if exited else None,
                 "open": filled - exited - (t["outside_qty"] or 0), "realized": round(realized, 2),
                 "uncertain": [o for o in orders if o["status"] in LOCAL_PENDING]}
 
     def _apply(self, t: dict, q: dict) -> None:
         upd = {}
+        if q["entries"] > 1 and q["intended"] and q["intended"] != t["quantity"]:
+            upd.update(quantity=q["intended"], lots=q["intended"] // t["lot_size"])
         if q["filled"] != t["filled_qty"]:
             ev = "ENTRY_EXECUTED" if q["entry"] and q["filled"] >= q["entry"]["quantity"] else "ENTRY_PARTIAL_FILL"
             self.audit(t["id"], ev, "INFO", {"filled_qty": q["filled"], "avg_price": q["entry_avg"]})
@@ -660,7 +711,7 @@ class TradeService:
         q = self._derive(t)
         self._apply(t, q)
         entry = q["entry"]
-        if entry and entry["broker_order_id"] and is_working(entry["status"]):
+        if entry and entry["broker_order_id"] and is_working(entry["status"]) and q["entries"] == 1:
             self._adopt_entry_terms(t, entry)
 
         # --- entry order outcome -----------------------------------------------------------------
