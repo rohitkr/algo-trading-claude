@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     from .web.server import make_server
     port = args.port or cfg.port
     srv = make_server(app, port)
-    mon = Monitor(app.service, cfg.poll_seconds, after_tick=app.hub.after_tick)
+    mon = Monitor(app.service, cfg.poll_seconds, after_tick=app.hub.after_tick, fast_s=cfg.fast_poll_seconds)
     app.hub.start()
     mon.start()
     banner = "LIVE TRADING - REAL ORDERS" if cfg.live else "PAPER (simulated exchange)"

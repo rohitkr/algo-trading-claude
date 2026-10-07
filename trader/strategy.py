@@ -75,6 +75,9 @@ class GlobalConfig:
     days: tuple[str, ...] = ()                   # informational only in Phase 1 (future: scheduled runs)
     exit_profit_amount: float | None = None      # combined P&L across all legs
     exit_loss_amount: float | None = None        # positive number; combined P&L <= -this exits
+    # Combined SL as a signed P&L level, set on a running strategy: -2000 = exit at a ₹2,000 loss, +1500 = exit if
+    # the profit falls back to ₹1,500 (profit locked; move it up by hand to trail). Replaces exit_loss_amount.
+    exit_sl_pnl: float | None = None
     no_trade_after: time | None = None           # refuses Trade All after this time
     trailing_mode: str = "NONE"                  # NONE | LOCK_FIX | TRAIL | LOCK_AND_TRAIL
     lock_if_profit_reaches: float | None = None
@@ -96,7 +99,8 @@ class GlobalConfig:
         return cls(name=str(d.get("name") or "").strip(), order_type=order_type,
                    start_time=_time(d.get("start_time")), square_off_time=_time(d.get("square_off_time")),
                    days=days, exit_profit_amount=_amount(d.get("exit_profit_amount")),
-                   exit_loss_amount=_amount(d.get("exit_loss_amount")), no_trade_after=_time(d.get("no_trade_after")),
+                   exit_loss_amount=_amount(d.get("exit_loss_amount")), exit_sl_pnl=_num(d.get("exit_sl_pnl")),
+                   no_trade_after=_time(d.get("no_trade_after")),
                    trailing_mode=trailing_mode, lock_if_profit_reaches=_num(d.get("lock_if_profit_reaches")),
                    lock_profit_at=_num(d.get("lock_profit_at")), trail_every_increase=_num(d.get("trail_every_increase")),
                    trail_profit_by=_num(d.get("trail_profit_by")),
@@ -273,8 +277,15 @@ class StrategyService:
             if s["status"] != "ACTIVE":
                 legs = self.repo.trades_by_group(s["id"])
                 booked = round(sum((x["realized_pnl"] or 0) for x in legs if x["status"] not in L.OPEN_STATUSES), 2)
+                # The P&L rules restart from 0 for the re-entry (pnl_base), so a profit-LOCK combined SL from the
+                # previous run (>= 0, e.g. +3000) would square the new leg off at once (2026-10-07, SENSEX 72900 PE:
+                # re-entered, exited 7 s later). Drop it; a negative combined SL (a loss limit) still applies.
+                cfg_now = json.loads(s["config"])
+                if cfg_now.get("exit_sl_pnl") is not None and cfg_now["exit_sl_pnl"] >= 0:
+                    cfg_now["exit_sl_pnl"] = None
                 self.repo.update_strategy(s["id"], status="ACTIVE", exit_reason=None, exit_time=None,
-                                          best_pnl=None, locked_pnl=None, pnl_base=booked)
+                                          best_pnl=None, locked_pnl=None, pnl_base=booked,
+                                          config=json.dumps(GlobalConfig.from_json(cfg_now).to_json()))
             self.svc.audit(p["trade_id"], "LEG_ADDED", "INFO",
                            {"strategy_id": s["id"], "from_leg": trade_id, "reopened": s["status"] != "ACTIVE"})
             return {"ok": True, "trade_id": p["trade_id"], "strategy_id": s["id"]}
@@ -359,7 +370,9 @@ class StrategyService:
         reason = None
         if cfg.exit_profit_amount is not None and combined >= cfg.exit_profit_amount:
             reason = "STRATEGY_PROFIT_TARGET"
-        elif cfg.exit_loss_amount is not None and combined <= -abs(cfg.exit_loss_amount):
+        elif cfg.exit_sl_pnl is not None and combined <= cfg.exit_sl_pnl:
+            reason = "STRATEGY_LOSS_LIMIT" if cfg.exit_sl_pnl < 0 else "STRATEGY_PROFIT_LOCKED"
+        elif cfg.exit_sl_pnl is None and cfg.exit_loss_amount is not None and combined <= -abs(cfg.exit_loss_amount):
             reason = "STRATEGY_LOSS_LIMIT"
         if reason is None and cfg.trailing_mode != "NONE":
             reason = self._trail(s, cfg, combined)
@@ -409,6 +422,8 @@ class StrategyService:
                 self.repo.update_trade(t["id"], pending_exit_reason=reason)
                 self.svc.audit(t["id"], "EXIT_TRIGGERED", "WARNING", {"reason": reason, "strategy_id": s["id"]})
         self.repo.update_strategy(s["id"], status="DONE", exit_reason=reason, exit_time=self.repo.now())
+        # act on it in THIS tick (another pass), not 3 s later on the next one: every second costs money
+        self.svc._resync = True
 
     # -- margin needed for a strategy before placing it (display only) ---------------------------------
     def margin(self, payload: dict) -> dict:
@@ -457,8 +472,12 @@ class StrategyService:
             if s["status"] != "ACTIVE":
                 raise ActionError(f"strategy {strategy_id} is {s['status']}: nothing running to protect")
             cfg = json.loads(s["config"])
-            old = {k: cfg.get(k) for k in ("exit_loss_amount", "exit_profit_amount")}
-            new = {k: _amount(payload.get(k)) for k in old}
+            old = {k: cfg.get(k) for k in ("exit_loss_amount", "exit_sl_pnl", "exit_profit_amount")}
+            new = {"exit_profit_amount": _amount(payload.get("exit_profit_amount"))}
+            if "exit_sl_pnl" in payload:          # signed combined SL (may be positive: profit locked)
+                new.update(exit_sl_pnl=_num(payload.get("exit_sl_pnl")), exit_loss_amount=None)
+            else:
+                new.update(exit_loss_amount=_amount(payload.get("exit_loss_amount")), exit_sl_pnl=None)
             cfg.update(new)
             self.repo.update_strategy(strategy_id, config=json.dumps(GlobalConfig.from_json(cfg).to_json()))
             self.svc.audit(None, "STRATEGY_EXITS_CHANGED", "INFO", {"strategy_id": strategy_id, "from": old, "to": new})
@@ -473,6 +492,7 @@ class StrategyService:
             legs = self.repo.trades_by_group(strategy_id)
             open_legs = [t for t in legs if t["status"] in L.OPEN_STATUSES]
             self._exit_all(s, open_legs, "USER_EXIT")
+            self.svc._tick_locked()               # place the exits now (same as a single leg's Exit)
             return self.view(strategy_id)
 
     # -- views ---------------------------------------------------------------------------------------
@@ -491,6 +511,7 @@ class StrategyService:
         v["config"] = json.loads(s["config"])
         v["legs"] = [self.svc.trade_view(t["id"]) for t in legs]
         v["combined_pnl"] = combined
+        v["rule_pnl"] = round(combined - (s.get("pnl_base") or 0), 2)   # what max loss / combined SL compare against
         v["open_legs"] = len(open_legs)
         # legs that never became a position (blocked, not placed, rejected by the broker): shown on the card
         v["failed_legs"] = [{"id": t["id"], "side": t["side"], "tradingsymbol": t["tradingsymbol"],

@@ -108,3 +108,22 @@ def test_exit_while_an_add_is_resting_cancels_it_and_closes_what_is_held(tmp_pat
     t = r.trade(tid)
     assert t["status"] == L.EXITED and t["exited_qty"] == 130 and t["open_qty"] == 0
     assert r.repo.orders(tid, "ENTRY")[-1]["status"] == "CANCELLED"
+
+
+def test_re_enter_after_a_profit_lock_does_not_exit_at_once(tmp_path):
+    # 2026-10-07: strategy closed by its combined SL +3000 (profit locked); re-entering kept +3000, the new P&L
+    # restarted at 0 (<= +3000) and the fresh leg was squared off 7 s later
+    r, strat, tid, sid = one_leg(tmp_path)                 # BUY 2 lots (130) @ 100
+    r.price(120)
+    r.tick()
+    strat.set_exits(sid, {"exit_sl_pnl": 1300})            # lock +1,300
+    r.price(109)                                           # +1,170 -> locked exit
+    for _ in range(3):
+        r.tick()
+    assert r.trade(tid)["exit_reason"] == "STRATEGY_PROFIT_LOCKED"
+    res = strat.add_to_leg(tid, {"lots": 2, "price_type": "LIMIT", "entry_price": 109, "stop_loss": 99})
+    assert res["ok"], res
+    for _ in range(3):
+        r.tick()
+    assert r.trade(res["trade_id"])["status"] == L.POSITION_ACTIVE
+    assert json.loads(r.repo.strategy(sid)["config"])["exit_sl_pnl"] is None

@@ -254,8 +254,8 @@ button.danger { background: var(--sell); color: #fff; border-color: var(--sell);
 .add-btn:hover { background: var(--buy); color: #fff; }
 .edit-leg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .status-pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.2); }
-.status-pill.ACTIVE { background: var(--accent); color: #fff; }
-.status-pill.DONE { background: var(--buy); color: #fff; }
+.status-pill.ACTIVE { background: var(--buy); color: #fff; }                 /* running: green */
+.status-pill.DONE { background: rgba(127,127,127,.22); color: var(--muted); }  /* finished: quiet grey */
 .status-pill.CANCELLED { background: var(--sell); color: #fff; }
 
 dialog { border: 1px solid var(--line); border-radius: 10px; max-width: 560px; width: 92vw; background: var(--card); color: var(--fg); }

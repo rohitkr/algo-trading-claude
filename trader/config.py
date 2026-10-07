@@ -45,6 +45,7 @@ Safety: TRADER_MODE defaults to PAPER (simulated exchange, no Zerodha orders). A
 | TRADER_MAX_ENTRY_DEVIATION_PCT    | 20                         | entry limit vs Breeze LTP (fat-finger guard; 0 = off)    |
 | TRADER_REQUIRE_LTP_FOR_ENTRY      | true                       | refuse entries when no Breeze price is available         |
 | TRADER_HOSTNAMES                  | algo.local                 | extra names for the web UI (each also needs a line in /etc/hosts: `127.0.0.1 algo.local` and `::1 algo.local`); any *.localhost name works without this |
+| TRADER_FAST_POLL_SECONDS          | 0.7                        | how often the monitor checks while an exit is in progress (normal cadence: TRADER_POLL_SECONDS) |
 | TRADER_ALLOW_ADD_TO_SYMBOL        | true                       | allow a 2nd trade (same side) in a symbol already held; opposite side is always refused |
 | TRADER_FREEZE_QTY_<UNDERLYING>    | NIFTY 1800, BANKNIFTY 900, FINNIFTY 1800, SENSEX 1000 | orders above this are refused (no slicing) |
 | TRADER_CONFIRM_TOKEN_SECONDS      | 120                        | a preview/confirm token expires after this               |
@@ -147,6 +148,7 @@ class TraderConfig:
         limit, or ₹10,000 when that limit is off."""
         return self.max_loss_per_trade or 10_000.0
     require_ltp_for_entry: bool = True
+    fast_poll_seconds: float = 0.7           # TRADER_FAST_POLL_SECONDS: tick cadence while an exit is in progress
     allow_add_to_symbol: bool = True
     hostnames: tuple = ("algo.local",)     # TRADER_HOSTNAMES: extra names the web UI answers to (with /etc/hosts)       # TRADER_ALLOW_ADD_TO_SYMBOL: a 2nd trade (same side) in a held symbol
     freeze_qty: dict = field(default_factory=lambda: dict(DEFAULT_FREEZE))
@@ -235,6 +237,7 @@ class TraderConfig:
             max_entry_deviation_pct=float(g("TRADER_MAX_ENTRY_DEVIATION_PCT", d.max_entry_deviation_pct)),
             require_ltp_for_entry=_bool(g("TRADER_REQUIRE_LTP_FOR_ENTRY", "true")),
             allow_add_to_symbol=_bool(g("TRADER_ALLOW_ADD_TO_SYMBOL", "true")),
+            fast_poll_seconds=float(g("TRADER_FAST_POLL_SECONDS", d.fast_poll_seconds)),
             hostnames=tuple(h.strip().lower() for h in g("TRADER_HOSTNAMES", ",".join(d.hostnames)).split(",")
                             if h.strip()),
             freeze_qty=freeze,

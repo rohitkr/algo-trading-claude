@@ -847,7 +847,7 @@ function collectConfig() {
     square_off_time: $("#cfg-square-off").value || null,
     days: $$(".day.on").map((b) => b.dataset.day),
     exit_profit_amount: $("#cfg-exit-profit").value || null,
-    exit_loss_amount: $("#cfg-exit-loss").value || null,
+    exit_loss_amount: $("#cfg-exit-loss").value ? Math.abs(Number($("#cfg-exit-loss").value)) : null,   // "-2000" = 2000
     no_trade_after: $("#cfg-no-trade-after").value || null,
     trailing_mode: mode,
     move_sl_to_cost_enabled: $("#cfg-sl-cost-enabled").checked,
@@ -1006,7 +1006,7 @@ const builderQty = () => LEGS.filter((l) => l.checked).reduce((s, l) => s + l.lo
 function markTightExits() {                                 // red box + reason on hover; no text, so nothing shifts
   const qty = builderQty();
   for (const [id, key] of [["#cfg-exit-loss", "exit_loss_amount"], ["#cfg-exit-profit", "exit_profit_amount"]]) {
-    const w = tightExits({[key]: $(id).value}, qty);
+    const w = tightExits({[key]: Math.abs(Number($(id).value)) || null}, qty);
     $(id).classList.toggle("bad", w.length > 0);
     $(id).title = w[0] || "";
   }
@@ -1014,7 +1014,7 @@ function markTightExits() {                                 // red box + reason 
 ["#cfg-exit-loss", "#cfg-exit-profit"].forEach((id) => $(id).addEventListener("input", markTightExits));
 async function confirmTight(warnings) {
   if (!warnings.length) return true;
-  const pending = dialog("Max loss / profit looks too tight", `<ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
+  const pending = dialog("Check the combined exit", `<ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
     <p class="hint small">Use a bigger amount, or leave it blank (off) and rely on the legs' own stop-loss.</p>`);
   okButton("Place anyway");
   return pending;
@@ -1088,7 +1088,7 @@ function contractName(t) {
 const EXIT_REASONS = {
   STOP_LOSS_HIT: "SL hit", TRAILING_SL_HIT: "Trailing SL hit", TARGET_HIT: "Target booked", USER_EXIT: "Exited by you",
   MANUAL_EXIT: "Closed in Kite", AUTO_EXIT: "Auto-exit time", SQUARE_OFF: "Square-off time", DAILY_LIMIT: "Daily loss limit",
-  STRATEGY_LOSS_LIMIT: "Max loss hit", STRATEGY_PROFIT_TARGET: "Max profit booked", STRATEGY_TRAIL_STOP: "Trailing profit stop",
+  STRATEGY_LOSS_LIMIT: "Max loss hit", STRATEGY_PROFIT_LOCKED: "Locked profit (combined SL)", STRATEGY_PROFIT_TARGET: "Max profit booked", STRATEGY_TRAIL_STOP: "Trailing profit stop",
 };
 function legStatus(t) {
   if (t.pending_exit_reason) return {text: `Exiting · ${EXIT_REASONS[t.pending_exit_reason] || t.pending_exit_reason}`, cls: "warn"};
@@ -1146,7 +1146,9 @@ function strategyCard(s) {
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
     ${s.status === "ACTIVE" ? `<div class="strategy-exits">
-      <span class="ex-chip">Max loss <b class="neg">${cfg.exit_loss_amount ? money(cfg.exit_loss_amount) : "off"}</b></span>
+      <span class="ex-chip">${cfg.exit_sl_pnl != null
+        ? `Combined SL <b class="${cfg.exit_sl_pnl >= 0 ? "pos" : "neg"}">${cfg.exit_sl_pnl >= 0 ? "+" : ""}${money(cfg.exit_sl_pnl)}${cfg.exit_sl_pnl >= 0 ? " locked" : ""}</b>`
+        : `Max loss <b class="neg">${cfg.exit_loss_amount ? money(cfg.exit_loss_amount) : "off"}</b>`}</span>
       <span class="ex-chip">Max profit <b class="pos">${cfg.exit_profit_amount ? money(cfg.exit_profit_amount) : "off"}</b></span>
       <button type="button" class="ex-edit" data-exits="${s.id}" title="Change the combined max loss / max profit">✎ Edit</button></div>` : ""}
     ${failedHtml}
@@ -1336,20 +1338,33 @@ async function addToLeg(tid, reenter) {
 }
 
 // Change a running strategy's combined max loss / max profit (blank = off).
+// Change a running strategy's combined SL (a signed P&L level: -2000 = exit at a ₹2,000 loss, +1500 = exit if
+// the profit falls back to ₹1,500, i.e. profit locked - raise it by hand to trail) and max profit. Blank = off.
 async function editExits(sid) {
   try {
     const s = (await api(`/api/strategies/${sid}`)).strategy;
     const c = s.config;
+    const now = s.rule_pnl ?? s.combined_pnl;
+    const slNow = c.exit_sl_pnl ?? (c.exit_loss_amount ? -c.exit_loss_amount : "");
     const ok = await dialog(`Combined exit: #${s.id} ${s.name}`, `
-      <p class="hint small">All legs are squared off when the combined P&amp;L (now <b>${money(s.combined_pnl)}</b>) reaches either. Blank = off.</p>
+      <p class="hint small">Combined P&amp;L now <b class="${now >= 0 ? "pos" : "neg"}">${money(now)}</b>. Every leg is squared off when it
+        falls to the combined SL or rises to the max profit. Blank = off.</p>
       <div class="edit-leg-grid">
-        <label>Max loss ₹ <input id="ex-loss" type="number" min="0" step="1" placeholder="off" value="${c.exit_loss_amount ?? ""}"></label>
+        <label>Combined SL (P&amp;L ₹) <input id="ex-sl" type="number" step="1" placeholder="off, e.g. -2000" value="${slNow}"></label>
         <label>Max profit ₹ <input id="ex-profit" type="number" min="0" step="1" placeholder="off" value="${c.exit_profit_amount ?? ""}"></label>
-      </div>`);
+      </div>
+      <p class="hint small">−2000 = exit at a ₹2,000 loss · +1500 = exit if the profit falls back to ₹1,500 (locks it in;
+        raise it as the profit grows to trail).</p>`);
     if (!ok) return;
-    const vals = {exit_loss_amount: $("#ex-loss").value || null, exit_profit_amount: $("#ex-profit").value || null};
+    const sl = $("#ex-sl").value === "" ? null : Number($("#ex-sl").value);
+    const vals = {exit_sl_pnl: sl, exit_profit_amount: $("#ex-profit").value || null};
     const openQty = s.legs.reduce((a, t) => a + (LEG_LIVE_STATUSES.has(t.status) ? (t.open_qty || t.quantity || 0) : 0), 0);
-    if (!(await confirmTight(tightExits(vals, openQty)))) return;
+    const warn = [];
+    if (sl != null && sl >= now) warn.push(`Combined SL ${money(sl)} is at or above the P&L now (${money(now)}): every leg will be squared off at once.`);
+    else if (sl != null && openQty && (now - sl) / openQty < TIGHT_PTS)
+      warn.push(`Combined SL ${money(sl)} is only ${((now - sl) / openQty).toFixed(1)} points below the P&L now on ${openQty} quantity: normal bid/ask movement can trigger it.`);
+    warn.push(...tightExits({exit_profit_amount: vals.exit_profit_amount}, openQty));
+    if (!(await confirmTight(warn))) return;
     await api(`/api/strategies/${sid}/exits`, vals);
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }

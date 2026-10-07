@@ -604,9 +604,17 @@ class TradeService:
         with self.lock:
             return self._tick_locked()
 
+    def exiting(self) -> bool:
+        """An exit is in progress (waiting on an SL cancel, an exit order or its fill): the monitor then ticks
+        every TRADER_FAST_POLL_SECONDS instead of TRADER_POLL_SECONDS, so the position is closed in ~1-2 s, not 6-9."""
+        return any(t["pending_exit_reason"] or t["status"] in (L.EXIT_ORDER_PLACED, L.EXIT_PENDING)
+                   for t in self.repo.trades(L.OPEN_STATUSES))
+
     def _tick_locked(self) -> dict:
         result = {}
-        for _ in range(3):                    # an extra pass right after a cancel we must see confirmed
+        # extra passes right after something we must see confirmed: a combined exit triggered -> the SL cancel ->
+        # the exit order -> its fill, all in one tick when Zerodha answers fast (bounded, never loops forever)
+        for _ in range(4):
             self._resync = False
             result = self._one_pass()
             if not self._resync or not result.get("ok"):
