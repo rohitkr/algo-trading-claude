@@ -27,6 +27,7 @@ function saveStored() {
   } catch (e) { /* private window etc: ignore */ }
 }
 const STORED = loadStored();
+let renderSettingsChip = () => {};                       // set up with the settings drawer (end of file)
 
 async function api(path, body) {
   const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json", "X-Trader": "1"}, body: JSON.stringify(body)};
@@ -96,6 +97,7 @@ function restoreConfig() {
   const c = STORED?.config;
   if (!c) return;
   if (c.order_type) { const el = $(`input[name=order_type][value="${c.order_type}"]`); if (el) el.checked = true; }
+  setTimeout(() => renderSettingsChip(), 0);              // the top-bar chip shows the restored order type
   if (c.start_time) $("#cfg-start-time").value = c.start_time;
   if (c.square_off_time) $("#cfg-square-off").value = c.square_off_time;
   if (Array.isArray(c.days)) $$(".day").forEach((b) => b.classList.toggle("on", c.days.includes(b.dataset.day)));
@@ -328,6 +330,7 @@ function flipSide(leg) {
 }
 
 function renderLegs() {
+  if (typeof markTightExits === "function") setTimeout(markTightExits, 0);
   // Re-rendering replaces every input, so keep the focused one focused: each ↑/↓ on a number box fires
   // "change" and re-renders, which used to drop focus after the first key press.
   const a = document.activeElement, row = a?.closest?.("#leg-tbody tr[data-id]");
@@ -910,8 +913,6 @@ function confirmOrders(active) {
   if (sides.size === 1) { const sd = [...sides][0]; okButton(sd === "BUY" ? "Buy" : "Sell", sd); }
   else okButton("Place orders");
   const draw = () => {
-    const sellFirst = rows.findIndex((r) => r.leg.side === "SELL") < rows.map((r) => r.leg.side).lastIndexOf("BUY") &&
-      rows.some((r) => r.leg.side === "SELL");
     const all = rows.every((r) => r.type === "LIMIT") ? "LIMIT" : rows.every((r) => r.type === "MARKET") ? "MARKET" : "";
     $("#dlg-body").innerHTML = `
       <div class="order-all">All legs: <button type="button" data-all="LIMIT" class="${all === "LIMIT" ? "on" : ""}">Limit</button>
@@ -932,8 +933,7 @@ function confirmOrders(active) {
         <td><button type="button" data-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
           <button type="button" data-down="${i}" ${i === rows.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button></td>
       </tr>`).join("")}</table>
-      ${sellFirst ? `<p class="strategy-warning">⚠ A SELL leg is placed before a BUY leg: it goes in unhedged for a moment and
-        needs more margin. Move BUY legs up unless you mean it.</p>` : ""}`;
+`;
   };
   return new Promise((resolve) => {
     const body = $("#dlg-body");
@@ -992,9 +992,38 @@ function confirmOrders(active) {
   });
 }
 
+// A combined max loss / max profit worth only a point or two of movement trips on the bid/ask spread the moment the
+// order fills (2026-10-07: max loss ₹200 on 325 qty = 0.6 pts squared a fresh SELL off within 4 s).
+const TIGHT_PTS = 2;
+function tightExits(cfg, qty) {
+  if (!qty) return [];
+  return [["Max loss", cfg.exit_loss_amount], ["Max profit", cfg.exit_profit_amount]]
+    .filter(([, v]) => Number(v) > 0 && Number(v) / qty < TIGHT_PTS)
+    .map(([n, v]) => `${n} ₹${Number(v).toLocaleString("en-IN")} is only ${(Number(v) / qty).toFixed(1)} points on ${qty} quantity: ` +
+      "normal bid/ask movement can trigger it right after the order fills.");
+}
+const builderQty = () => LEGS.filter((l) => l.checked).reduce((s, l) => s + l.lots * (l.lot_size || 1), 0);
+function markTightExits() {                                 // red box + reason on hover; no text, so nothing shifts
+  const qty = builderQty();
+  for (const [id, key] of [["#cfg-exit-loss", "exit_loss_amount"], ["#cfg-exit-profit", "exit_profit_amount"]]) {
+    const w = tightExits({[key]: $(id).value}, qty);
+    $(id).classList.toggle("bad", w.length > 0);
+    $(id).title = w[0] || "";
+  }
+}
+["#cfg-exit-loss", "#cfg-exit-profit"].forEach((id) => $(id).addEventListener("input", markTightExits));
+async function confirmTight(warnings) {
+  if (!warnings.length) return true;
+  const pending = dialog("Max loss / profit looks too tight", `<ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
+    <p class="hint small">Use a bigger amount, or leave it blank (off) and rely on the legs' own stop-loss.</p>`);
+  okButton("Place anyway");
+  return pending;
+}
+
 $("#trade-all").onclick = async () => {
   const active = LEGS.filter((l) => l.checked);
   if (!active.length) return alertBox("Nothing to trade", ["select at least one leg"]);
+  if (!(await confirmTight(tightExits(collectConfig(), builderQty())))) return;
   const ordered = await confirmOrders(active);
   if (!ordered) return;
   $("#trade-all").disabled = true;
@@ -1048,6 +1077,35 @@ async function exitStrategy(id) {
 
 const LEG_LIVE_STATUSES = new Set(["ENTRY_ORDER_PLACED", "ENTRY_PENDING", "ENTRY_EXECUTED", "POSITION_ACTIVE"]);
 
+// "NIFTY 22300 PE · 13 Oct" instead of NIFTY26O1322300PE (the raw symbol stays in the tooltip)
+function contractName(t) {
+  const d = t.expiry ? new Date(`${t.expiry}T00:00:00`) : null;
+  const day = d ? d.toLocaleDateString("en-IN", {day: "numeric", month: "short"}) : "";
+  const k = Number(t.strike);
+  return `${esc(t.underlying || "")} ${Number.isInteger(k) ? k : k.toFixed(1)} ${esc(t.option_type || "")}${day ? ` <small>· ${day}</small>` : ""}`;
+}
+// Status in words, with WHY a leg closed: SL hit, Target booked, Manual exit, ...
+const EXIT_REASONS = {
+  STOP_LOSS_HIT: "SL hit", TRAILING_SL_HIT: "Trailing SL hit", TARGET_HIT: "Target booked", USER_EXIT: "Exited by you",
+  MANUAL_EXIT: "Closed in Kite", AUTO_EXIT: "Auto-exit time", SQUARE_OFF: "Square-off time", DAILY_LIMIT: "Daily loss limit",
+  STRATEGY_LOSS_LIMIT: "Max loss hit", STRATEGY_PROFIT_TARGET: "Max profit booked", STRATEGY_TRAIL_STOP: "Trailing profit stop",
+};
+function legStatus(t) {
+  if (t.pending_exit_reason) return {text: `Exiting · ${EXIT_REASONS[t.pending_exit_reason] || t.pending_exit_reason}`, cls: "warn"};
+  switch (t.status) {
+    case "POSITION_ACTIVE": case "ENTRY_EXECUTED": return {text: "Running", cls: "run"};
+    case "ENTRY_ORDER_PLACED": case "ENTRY_PENDING": return {text: "Waiting for fill", cls: "wait"};
+    case "EXIT_ORDER_PLACED": case "EXIT_PENDING": return {text: "Exiting", cls: "warn"};
+    case "EXITED": case "MANUALLY_EXITED": return {text: EXIT_REASONS[t.exit_reason] || "Exited", cls: "done"};
+    case "CANCELLED": return {text: "Cancelled", cls: "muted"};
+    case "REJECTED": return {text: "Rejected", cls: "bad"};
+    case "EXPIRED": return {text: "Not placed", cls: "muted"};
+    case "UNKNOWN_REQUIRES_RECONCILIATION": return {text: "Check in Kite", cls: "bad"};
+    case "ERROR": return {text: "Error", cls: "bad"};
+    default: return {text: t.status, cls: ""};
+  }
+}
+
 function strategyCard(s) {
   const cfg = s.config;
   const legRows = s.legs.map((t) => {
@@ -1060,12 +1118,15 @@ function strategyCard(s) {
     // Both place a NEW leg in this strategy (its own SL/target).
     const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0;
     const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
-    return `<tr><td>${t.side}</td><td class="sym">${esc(t.tradingsymbol)}</td><td class="num">${qtyText}</td>
+    const st = legStatus(t);
+    return `<tr><td><span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
+    <td class="sym" title="${esc(t.tradingsymbol)}">${contractName(t)}</td><td class="num">${qtyText}</td>
     <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
+    <td class="num">${t.exit_avg_price != null ? num(t.exit_avg_price) : "–"}</td>
     <td class="num" data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
     <td class="num">${num(t.current_sl)}</td><td class="num">${num(t.target)}</td>
     <td class="num ${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
-    <td title="${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}">${esc(t.status)}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}</td>
+    <td title="${esc(t.status)}${t.exit_reason ? " · " + esc(t.exit_reason) : ""}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}"><span class="leg-st ${st.cls}">${st.text}</span></td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
@@ -1084,12 +1145,14 @@ function strategyCard(s) {
       <span class="pnl ${cls}" data-strategy-pnl="${s.id}">${money(s.combined_pnl)}</span>
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
     </div>
-    ${s.status === "ACTIVE" ? `<div class="strategy-exits">Combined exit: max loss <b>${cfg.exit_loss_amount ? money(cfg.exit_loss_amount) : "off"}</b>
-      · max profit <b>${cfg.exit_profit_amount ? money(cfg.exit_profit_amount) : "off"}</b>
-      <button type="button" class="link-btn" data-exits="${s.id}">Edit</button></div>` : ""}
+    ${s.status === "ACTIVE" ? `<div class="strategy-exits">
+      <span class="ex-chip">Max loss <b class="neg">${cfg.exit_loss_amount ? money(cfg.exit_loss_amount) : "off"}</b></span>
+      <span class="ex-chip">Max profit <b class="pos">${cfg.exit_profit_amount ? money(cfg.exit_profit_amount) : "off"}</b></span>
+      <button type="button" class="ex-edit" data-exits="${s.id}" title="Change the combined max loss / max profit">✎ Edit</button></div>` : ""}
     ${failedHtml}
     <div class="leg-table-scroll">
-    <table class="legs-live"><tr><th class="c-side">Side</th><th class="c-sym">Symbol</th><th class="num c-qty">Qty</th><th class="num c-px">Entry</th>
+    <table class="legs-live"><tr><th class="c-side">Side</th><th class="c-sym">Contract</th><th class="num c-qty">Qty</th><th class="num c-px">Entry</th>
+      <th class="num c-px">Exit</th>
       <th class="num c-px">LTP <button type="button" class="ltp-refresh" data-strategy-ltp="${s.id}" title="Refresh every leg's LTP now">↻</button></th>
       <th class="num c-px">SL</th><th class="num c-px">TP</th><th class="num c-pnl">P&amp;L</th><th class="c-status">Status</th><th class="c-act"></th></tr>${legRows}</table>
     </div>
@@ -1284,8 +1347,10 @@ async function editExits(sid) {
         <label>Max profit ₹ <input id="ex-profit" type="number" min="0" step="1" placeholder="off" value="${c.exit_profit_amount ?? ""}"></label>
       </div>`);
     if (!ok) return;
-    await api(`/api/strategies/${sid}/exits`, {exit_loss_amount: $("#ex-loss").value || null,
-                                                exit_profit_amount: $("#ex-profit").value || null});
+    const vals = {exit_loss_amount: $("#ex-loss").value || null, exit_profit_amount: $("#ex-profit").value || null};
+    const openQty = s.legs.reduce((a, t) => a + (LEG_LIVE_STATUSES.has(t.status) ? (t.open_qty || t.quantity || 0) : 0), 0);
+    if (!(await confirmTight(tightExits(vals, openQty)))) return;
+    await api(`/api/strategies/${sid}/exits`, vals);
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
 }
@@ -1325,6 +1390,7 @@ let SHOW_CANCELLED = false;
 try { SHOW_CANCELLED = localStorage.getItem("trader:strategies:show-cancelled") === "1"; } catch (e) { /* ignore */ }
 {
   const lab = document.createElement("label");
+  lab.className = "inline-check";
   lab.innerHTML = `<input type="checkbox" id="show-cancelled" ${SHOW_CANCELLED ? "checked" : ""}> Show cancelled`;
   $("#strategies-filter").insertBefore(lab, $("#strategies-filter .history-pager"));
   $("#show-cancelled").onchange = (e) => {
@@ -1347,10 +1413,11 @@ function renderStrategies() {
 
 async function refreshStrategies() {
   let d;
-  try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "Server unreachable: " + e.message; return; }
-  const b = $("#banner");
-  b.className = "banner" + (d.live ? " live" : "");
-  b.textContent = d.live ? "● LIVE TRADING: orders go to Zerodha with real money" : "PAPER TRADING: simulated exchange, no orders reach Zerodha";
+  try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "offline"; $("#banner").title = "Server unreachable: " + e.message; return; }
+  const b = $("#banner");                                  // small LIVE / PAPER pill next to the title
+  b.className = "mode-pill" + (d.live ? " live" : "");
+  b.textContent = d.live ? "● LIVE" : "PAPER";
+  b.title = d.live ? "LIVE: orders go to Zerodha with real money" : "PAPER: simulated exchange, no orders reach Zerodha";
   MODE = d.mode;
   const h = $("#halt");
   h.classList.toggle("hidden", !d.halted);
@@ -1441,7 +1508,7 @@ setInterval(refreshStrategies, 30000);
   scrim.onclick = () => setDrawer(false);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer.classList.contains("open")) setDrawer(false); });
   // the top-bar button shows the settings that matter at a glance: order type + square-off time
-  const chip = () => {
+  const chip = renderSettingsChip = () => {
     const ot = $("input[name=order_type]:checked")?.value || "";
     const sq = $("#cfg-square-off").value;
     $("#settings-chip").textContent = [ot, sq && `sq-off ${sq}`].filter(Boolean).join(" · ");
@@ -1456,7 +1523,7 @@ setInterval(refreshStrategies, 30000);
   const fit = () => document.documentElement.style.setProperty("--ws-top", `${ws.getBoundingClientRect().top + window.scrollY}px`);
   fit();
   window.addEventListener("resize", fit);
-  new ResizeObserver(fit).observe($("#banner"));
+  new ResizeObserver(fit).observe($("#halt"));
 
   // summary rail width: drag the handle (or ←/→ when it has focus); remembered
   const KEY = "trader:strategy:rail-w", MIN = 320, MAX = () => Math.max(MIN, Math.min(820, window.innerWidth - 820));   // the legs table keeps ~800px

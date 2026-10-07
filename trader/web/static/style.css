@@ -92,3 +92,21 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 select { -webkit-appearance: none; appearance: none; padding-right: 28px;
   background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
   background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+
+/* dropdown list that opens below its box (dropdown.js) */
+.dd-panel { position: fixed; z-index: 100; display: flex; flex-direction: column; overflow: hidden; padding: 4px;
+  background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 28px rgba(0,0,0,.28); }
+.dd-search { margin: 2px 2px 6px; padding: 7px 9px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--card2, var(--bg)); color: var(--fg); }
+.dd-search:focus { outline: 2px solid var(--accent, #2f6fed); outline-offset: 0; }
+.dd-list { overflow: auto; }
+.dd-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; font-size: 13px; }
+.dd-item.hi { background: var(--card2, rgba(127,127,127,.12)); }
+.dd-item.selected { color: var(--accent, #2f6fed); font-weight: 700; }
+.dd-item.selected::after { content: "✓"; float: right; margin-left: 14px; }
+.dd-item.disabled { opacity: .45; cursor: default; }
+.dd-group { padding: 8px 10px 4px; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.dd-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
+/* dropdown list: no permanent scroll bar (macOS "always show scroll bars" drew a wide white one); a thin
+   overlay-style thumb appears only while the pointer is over the list. Scrolling works either way. */
+.dd-list { scrollbar-width: none; overscroll-behavior: contain; }
+.dd-list:hover { scrollbar-width: thin; scrollbar-color: rgba(127, 127, 127, .45) transparent; }

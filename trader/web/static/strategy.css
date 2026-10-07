@@ -295,13 +295,13 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 .hidden { display: none !important; }
 /* strategy legs: fixed layout, so column widths never depend on the (ticking) contents */
 .strategy-card table.legs-live { table-layout: fixed; width: 100%; min-width: 880px; }
-.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 16%; } .legs-live .c-qty { width: 8%; }
-.legs-live .c-px { width: 7%; } .legs-live .c-pnl { width: 9%; } .legs-live .c-status { width: 11%; }
-.legs-live .c-act { width: 23%; }   /* Edit + Add + Exit fit without scrolling */
+.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 17%; } .legs-live .c-qty { width: 7%; }
+.legs-live .c-px { width: 6.5%; } .legs-live .c-pnl { width: 8%; } .legs-live .c-status { width: 12%; }
+.legs-live .c-act { width: 18.5%; }   /* Edit + Add + Exit fit without scrolling */
 .legs-live td.leg-actions button { padding-left: 10px; padding-right: 10px; }
 /* one line per leg whatever its state: buttons and status never wrap (full status on hover) */
 .legs-live td.leg-actions { white-space: nowrap; }
-.legs-live td:nth-child(9) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legs-live td:nth-child(10) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legs-live td.sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .edit-ref { margin: 0 0 10px; font-variant-numeric: tabular-nums; }
 
@@ -339,7 +339,7 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 /* order pop-up: coloured B/S (click to switch) + CE/PE tag, same look as the builder */
 .order-confirm .bs-btn { width: 28px; height: 26px; font-size: 12px; padding: 0; }
 .order-confirm .bs-btn.tag { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 22px;
-  margin-left: 4px; border-radius: 5px; color: #fff; font-weight: 700; font-size: 11px; cursor: default; }
+  margin-left: 4px; border-radius: 5px; color: var(--fg); font-weight: 600; font-size: 11px; cursor: default; }
 .order-confirm input[disabled] { opacity: .6; }
 .order-confirm td { height: 40px; }
 table.order-confirm input[type=text] { width: 90px; }
@@ -388,3 +388,40 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .chart-legend .lg.today { background: #4f8cff; }
 .chart-spot { position: absolute; top: 6px; left: 56px; font-size: 11px; font-weight: 700; color: var(--warn); pointer-events: none; }
 .chart-wait { padding: 12px; margin: 0; }
+
+/* strategy table: B/S chip, readable contract, status in words */
+.legs-live .bs-btn.chip { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; font-size: 11px; cursor: default; }
+.legs-live td.sym small { color: var(--muted); font-weight: 400; }
+.leg-st { font-size: 12px; font-weight: 600; }
+.leg-st.run { color: var(--buy); } .leg-st.wait { color: var(--accent); } .leg-st.warn { color: var(--warn); }
+.leg-st.bad { color: var(--sell); } .leg-st.muted, .leg-st.done { color: var(--muted); }
+/* combined exit on a running strategy's card */
+.strategy-exits { gap: 8px; margin: 2px 0 10px; }
+.ex-chip { display: inline-flex; gap: 6px; align-items: center; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--card2); }
+.ex-edit { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); }
+.ex-edit:hover { background: var(--accent); color: #fff; }
+
+/* LIVE / PAPER as a small pill next to the title (replaces the full-width banner) */
+.mode-pill { display: inline-block; margin-left: 10px; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 800;
+  letter-spacing: .04em; vertical-align: middle; color: #fff; background: var(--paper); }
+.mode-pill.live { background: var(--live); }
+.base-row input.bad { border-color: var(--sell); box-shadow: 0 0 0 1px var(--sell); }
+
+/* dropdown list that opens below its box (dropdown.js) */
+.dd-panel { position: fixed; z-index: 100; display: flex; flex-direction: column; overflow: hidden; padding: 4px;
+  background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 28px rgba(0,0,0,.28); }
+.dd-search { margin: 2px 2px 6px; padding: 7px 9px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--card2, var(--bg)); color: var(--fg); }
+.dd-search:focus { outline: 2px solid var(--accent, #2f6fed); outline-offset: 0; }
+.dd-list { overflow: auto; }
+.dd-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; font-size: 13px; }
+.dd-item.hi { background: var(--card2, rgba(127,127,127,.12)); }
+.dd-item.selected { color: var(--accent, #2f6fed); font-weight: 700; }
+.dd-item.selected::after { content: "✓"; float: right; margin-left: 14px; }
+.dd-item.disabled { opacity: .45; cursor: default; }
+.dd-group { padding: 8px 10px 4px; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.dd-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
+.history-bar label.inline-check { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; }
+/* dropdown list: no permanent scroll bar (macOS "always show scroll bars" drew a wide white one); a thin
+   overlay-style thumb appears only while the pointer is over the list. Scrolling works either way. */
+.dd-list { scrollbar-width: none; overscroll-behavior: contain; }
+.dd-list:hover { scrollbar-width: thin; scrollbar-color: rgba(127, 127, 127, .45) transparent; }

@@ -8,10 +8,9 @@
 </head>
 <body>
 <div id="page-loading" class="page-loading"><div class="spinner-lg"></div><span>Loading instruments…</span></div>
-<div id="banner" class="banner">Loading…</div>
 <div id="halt" class="halt hidden"></div>
 <header class="topbar">
-  <h1>Strategy Builder</h1>
+  <h1>Strategy Builder <span id="banner" class="mode-pill">…</span></h1>
   <div class="topbar-right">
     <button type="button" id="settings-open" class="settings-btn" aria-controls="config-panel" aria-expanded="false"
       title="Order type, timings, trailing, move SL to cost">⚙ Settings <span id="settings-chip" class="settings-chip"></span></button>
@@ -94,7 +93,7 @@
   <div class="workspace" id="workspace">
   <section class="panel builder" id="legs-panel">
     <div class="spot-panel">
-      <select id="base-underlying" class="spot-instrument" aria-label="Instrument"></select>
+      <select id="base-underlying" class="spot-instrument" aria-label="Instrument" data-search></select>
       <select id="tmpl-select" class="tmpl-select" aria-label="Load a template" title="Replace the legs with a ready-made strategy">
         <option value="">Templates</option>
         <optgroup label="Neutral (sell premium)">
@@ -184,6 +183,7 @@
     <menu><button value="cancel" id="dlg-cancel">Cancel</button> <button value="ok" id="dlg-ok" class="danger">Confirm</button></menu>
   </form>
 </dialog>
+<script src="/static/dropdown.js"></script>
 <script src="/static/live.js"></script>
 <script src="/static/history.js"></script>
 <script src="/static/strategy.js"></script>
