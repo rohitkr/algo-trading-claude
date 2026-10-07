@@ -126,4 +126,5 @@ def test_re_enter_after_a_profit_lock_does_not_exit_at_once(tmp_path):
     for _ in range(3):
         r.tick()
     assert r.trade(res["trade_id"])["status"] == L.POSITION_ACTIVE
-    assert json.loads(r.repo.strategy(sid)["config"])["exit_sl_pnl"] is None
+    cfg = json.loads(r.repo.strategy(sid)["config"])
+    assert cfg["exit_sl_pnl"] is None and cfg["exit_loss_amount"] is None and cfg["exit_profit_amount"] is None

@@ -228,7 +228,8 @@ class StrategyService:
     def add_to_leg(self, trade_id: int, payload: dict) -> dict:
         """Running leg: add lots to it (same leg, average price, SL resized; TradeService.add_to_position).
         Closed leg: re-enter it, either side, as a NEW leg of the same strategy with its own SL/target. A finished
-        strategy is reopened; its profit/loss/trail rules then count only P&L made after the re-entry."""
+        strategy is reopened with its combined SL / max profit OFF (set them again with Edit); its other P&L rules
+        count only P&L made after the re-entry."""
         with self.svc.lock:
             t = self.repo.trade(trade_id)
             if t is None or t.get("group_id") is None:
@@ -277,12 +278,11 @@ class StrategyService:
             if s["status"] != "ACTIVE":
                 legs = self.repo.trades_by_group(s["id"])
                 booked = round(sum((x["realized_pnl"] or 0) for x in legs if x["status"] not in L.OPEN_STATUSES), 2)
-                # The P&L rules restart from 0 for the re-entry (pnl_base), so a profit-LOCK combined SL from the
-                # previous run (>= 0, e.g. +3000) would square the new leg off at once (2026-10-07, SENSEX 72900 PE:
-                # re-entered, exited 7 s later). Drop it; a negative combined SL (a loss limit) still applies.
+                # A re-entry starts with NO combined SL / max profit: the previous run's values (e.g. a +3000 profit
+                # lock, which squared a re-entered SENSEX leg off 7 s later on 2026-10-07) don't apply to the new
+                # position. They stay off until set again with Edit on the strategy card.
                 cfg_now = json.loads(s["config"])
-                if cfg_now.get("exit_sl_pnl") is not None and cfg_now["exit_sl_pnl"] >= 0:
-                    cfg_now["exit_sl_pnl"] = None
+                cfg_now.update(exit_sl_pnl=None, exit_loss_amount=None, exit_profit_amount=None)
                 self.repo.update_strategy(s["id"], status="ACTIVE", exit_reason=None, exit_time=None,
                                           best_pnl=None, locked_pnl=None, pnl_base=booked,
                                           config=json.dumps(GlobalConfig.from_json(cfg_now).to_json()))
