@@ -286,6 +286,29 @@ class TradeService:
             self._tick_locked()
             return {"ok": True, "trade": self.trade_view(trade_id), "order_status": row["status"]}
 
+    def entry_to_market(self, trade_id: int) -> dict:
+        """A leg still waiting for its entry to fill: move the resting entry order to a marketable price (live LTP
+        +/- TRADER_EXIT_BUFFER_PCT, like Market orders elsewhere) so it fills now - quick scalping. Done as an
+        ordinary edit (entry price only), so every edit check applies (an automatic SL moves with it)."""
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] not in (L.ENTRY_ORDER_PLACED, L.ENTRY_PENDING) or t["pending_exit_reason"]:
+                raise ActionError(f"trade is {t['status']}: only an entry still waiting to fill can go to market")
+            inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+        ltp = self._ltp_safe(inst, max_age=0)                     # a fresh price, outside the lock
+        if not ltp:
+            raise ActionError("no live price for this contract right now: try again, or edit the limit price")
+        buf = self.cfg.exit_buffer_pct / 100
+        price = round_to_tick(ltp * (1 + buf if t["side"] == "BUY" else 1 - buf), t["tick_size"], t["side"])
+        with self.lock:
+            plan = self.prepare_edit(trade_id, {"entry_price": price})
+            if not plan.get("ok"):
+                raise ActionError("; ".join(plan.get("errors") or ["not allowed"]))
+            self.audit(trade_id, "ENTRY_TO_MARKET", "INFO", {"ltp": ltp, "price": price})
+            self.apply_edit(trade_id, plan["token"])
+            self._tick_locked()                                    # read the fill right away
+            return {"ok": True, "price": price, "ltp": ltp, "trade": self.trade_view(trade_id)}
+
     def prepare(self, trade_id: int, action: str) -> dict:
         """Token + summary for a dangerous action (EXIT / CANCEL), shown in a confirmation dialog."""
         with self.lock:

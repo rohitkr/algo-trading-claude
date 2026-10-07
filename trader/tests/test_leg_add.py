@@ -128,3 +128,27 @@ def test_re_enter_after_a_profit_lock_does_not_exit_at_once(tmp_path):
     assert r.trade(res["trade_id"])["status"] == L.POSITION_ACTIVE
     cfg = json.loads(r.repo.strategy(sid)["config"])
     assert cfg["exit_sl_pnl"] is None and cfg["exit_loss_amount"] is None and cfg["exit_profit_amount"] is None
+
+
+def test_waiting_entry_goes_to_market_and_fills(tmp_path):
+    r = Rig(tmp_path)
+    r.price(100)
+    strat = StrategyService(r.svc, r.repo)
+    res = strat.create_and_trade({"config": {"order_type": "MIS"}, "legs": [dict(
+        underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE", side="BUY", lots=1,
+        entry_price=95, sl_value=10, sl_type="POINTS")]})            # limit below the market: rests unfilled
+    tid = res["confirmed"][0]
+    r.tick()
+    assert r.trade(tid)["status"] == L.ENTRY_PENDING
+    out = r.svc.entry_to_market(tid)
+    assert out["price"] == 102.0                            # LTP 100 + 2% buffer, rounded up to the tick
+    t = r.trade(tid)
+    assert t["status"] == L.POSITION_ACTIVE and t["entry_avg_price"] <= 102.0
+
+
+def test_market_button_refuses_a_running_position(tmp_path):
+    import pytest
+    from trader.service import ActionError
+    r, strat, tid, sid = one_leg(tmp_path)
+    with pytest.raises(ActionError):
+        r.svc.entry_to_market(tid)

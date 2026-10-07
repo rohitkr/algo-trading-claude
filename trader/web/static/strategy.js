@@ -1128,6 +1128,7 @@ function strategyCard(s) {
     <td class="num ${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
     <td title="${esc(t.status)}${t.exit_reason ? " · " + esc(t.exit_reason) : ""}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}"><span class="leg-st ${st.cls}">${st.text}</span></td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
+      ${canCancel ? `<button type="button" class="mkt-btn" data-leg-market="${t.id}" title="Fill now: move the limit to the live price">Market</button>` : ""}
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}
@@ -1370,6 +1371,23 @@ async function editExits(sid) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
+// A leg still waiting for its entry: fill it now at the market (the resting limit moves to LTP +/- buffer).
+async function legToMarket(tid) {
+  try {
+    const t = (await api(`/api/trades/${tid}`)).trade;
+    const ltp = t.kite_ltp ?? t.last_ltp;
+    const pending = dialog(`${t.side === "BUY" ? "Buy" : "Sell"} at market?`,
+      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${contractName(t)} · ${t.quantity} qty</div>
+       <p class="hint small">Limit ${num(t.entry_price)} → about ${ltp != null ? num(ltp) : "the live price"} (a marketable limit, so it fills
+       now but never at an absurd price). SL ${num(t.current_sl)} stays${t.sl_auto ? " (automatic: moves with the price)" : ""}.</p>`, MODE === "LIVE");
+    okButton(t.side === "BUY" ? "Buy now" : "Sell now", t.side);
+    if (!(await pending)) return;
+    const r = await api(`/api/trades/${tid}/entry_market`, {});
+    $("#form-hint").textContent = `${t.side} ${t.tradingsymbol}: limit moved to ${num(r.price)} (LTP ${num(r.ltp)})`;
+    refreshStrategies();
+  } catch (e) { alertBox("Not sent to market", [e.message]); }
+}
+
 async function cancelLeg(tid) {
   try {
     const p = await api(`/api/trades/${tid}/prepare`, {action: "CANCEL"});
@@ -1459,6 +1477,8 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (rid) return addToLeg(Number(rid), true);
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
+  const mid = ev.target.dataset.legMarket;
+  if (mid) return legToMarket(Number(mid));
   const cid = ev.target.dataset.legCancel;
   if (cid) return cancelLeg(Number(cid));
   const eid = ev.target.dataset.legEdit;
