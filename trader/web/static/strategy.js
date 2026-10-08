@@ -1094,7 +1094,10 @@ function legStatus(t) {
   if (t.pending_exit_reason) return {text: `Exiting · ${EXIT_REASONS[t.pending_exit_reason] || t.pending_exit_reason}`, cls: "warn"};
   switch (t.status) {
     case "POSITION_ACTIVE": case "ENTRY_EXECUTED": return {text: "Running", cls: "run"};
-    case "ENTRY_ORDER_PLACED": case "ENTRY_PENDING": return {text: "Waiting for fill", cls: "wait"};
+    case "ENTRY_ORDER_PLACED": case "ENTRY_PENDING":
+      return (t.filled_qty || 0) > 0
+        ? {text: `Partly filled ${t.filled_qty}/${t.quantity}`, cls: "part"}
+        : {text: "Waiting for fill", cls: "wait"};
     case "EXIT_ORDER_PLACED": case "EXIT_PENDING": return {text: "Exiting", cls: "warn"};
     case "EXITED": case "MANUALLY_EXITED": return {text: EXIT_REASONS[t.exit_reason] || "Exited", cls: "done"};
     case "CANCELLED": return {text: "Cancelled", cls: "muted"};
@@ -1106,8 +1109,22 @@ function legStatus(t) {
   }
 }
 
+// The strategy's badge says what its legs are actually doing (ACTIVE alone hid "nothing filled yet").
+function strategyState(s) {
+  if (s.status !== "ACTIVE") return {text: s.status, cls: s.status};
+  const live = s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status) || ["EXIT_ORDER_PLACED", "EXIT_PENDING"].includes(t.status));
+  if (live.some((t) => t.pending_exit_reason || ["EXIT_ORDER_PLACED", "EXIT_PENDING"].includes(t.status))) return {text: "EXITING", cls: "EXITING"};
+  const waiting = live.filter((t) => ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status));
+  const filled = live.filter((t) => (t.filled_qty || 0) > 0);
+  if (!live.length) return {text: "ACTIVE", cls: "ACTIVE"};
+  if (!filled.length) return {text: "WAITING", cls: "WAITING"};
+  if (waiting.length) return {text: "PARTIAL", cls: "PARTIAL"};
+  return {text: "RUNNING", cls: "RUNNING"};
+}
+
 function strategyCard(s) {
   const cfg = s.config;
+  const state = strategyState(s);
   const legRows = s.legs.map((t) => {
     const canExit = LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason;
     const canEdit = LEG_LIVE_STATUSES.has(t.status) && !t.pending_exit_reason;
@@ -1117,7 +1134,7 @@ function strategyCard(s) {
     // Add = more lots of this contract on a running leg; Re-buy / Re-sell = enter a closed leg again.
     // Both place a NEW leg in this strategy (its own SL/target).
     const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0;
-    const qtyText = t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
+    const qtyText = (t.filled_qty || 0) > 0 && t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     const st = legStatus(t);
     return `<tr><td><span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
     <td class="sym" title="${esc(t.tradingsymbol)}">${contractName(t)}</td><td class="num">${qtyText}</td>
@@ -1138,10 +1155,11 @@ function strategyCard(s) {
   const failedLegs = s.failed_legs || [];
   const failedHtml = failedLegs.length ? `<div class="strategy-warning" role="alert">⚠ ${failedLegs.length} leg(s) not placed:
     <ul>${failedLegs.map((f) => `<li>${esc(f.side)} ${esc(f.tradingsymbol)}: ${esc(f.error)}</li>`).join("")}</ul></div>` : "";
-  return `<div class="strategy-card${failedLegs.length ? " has-failed-legs" : ""}">
+  return `<div class="strategy-card st-${esc(state.cls)}${failedLegs.length ? " has-failed-legs" : ""}">
     <div class="head">
       <span class="name">#${s.id} ${esc(s.name)}</span>
-      <span class="status-pill ${esc(s.status)}">${esc(s.status)}</span>
+      <span class="status-pill ${esc(state.cls)}" title="${state.cls === "WAITING" ? "Orders placed, nothing filled yet" :
+        state.cls === "PARTIAL" ? "Some legs / lots filled, others still waiting" : state.cls === "RUNNING" ? "Every leg filled" : ""}">${esc(state.text)}</span>
       <span>order type ${esc(cfg.order_type)}</span>
       <span class="pnl ${cls}" data-strategy-pnl="${s.id}">${money(s.combined_pnl)}</span>
       ${s.status === "ACTIVE" && s.open_legs > 0 ? `<button type="button" class="danger" data-exit="${s.id}">Exit strategy</button>` : ""}
