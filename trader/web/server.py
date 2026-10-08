@@ -173,6 +173,11 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             try:
                 if u.path == "/api/preview":
                     return self._json(200, svc.preview(body))
+                m = re.fullmatch(r"/api/trades/(\d+)/add_order", u.path)
+                if m:
+                    return self._json(200, svc.update_add(int(m.group(1)), str(body.get("action") or ""),
+                                                          float(body["price"]) if body.get("price") not in (None, "") else None,
+                                                          int(body["add_id"]) if body.get("add_id") not in (None, "") else None))
                 m = re.fullmatch(r"/api/trades/(\d+)/entry_market", u.path)
                 if m:
                     return self._json(200, svc.entry_to_market(int(m.group(1))))

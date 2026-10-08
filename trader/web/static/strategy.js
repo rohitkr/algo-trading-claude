@@ -781,12 +781,13 @@ function applyTemplate(kind) {
   const base = {underlying: $("#base-underlying").value, expiry: $("#base-expiry").value};
   LEGS = [];
   const add = (o) => LEGS.push(newLeg({...base, ...o}));
+  // one-sided templates (all SELL / all BUY) list PE first, then CE (lower strike first, like the chain)
   if (kind === "straddle") {
-    add({side: "SELL", option_type: "CE", strike: atm});
     add({side: "SELL", option_type: "PE", strike: atm});
+    add({side: "SELL", option_type: "CE", strike: atm});
   } else if (kind === "strangle") {
-    add({side: "SELL", option_type: "CE", strike: atm + 2 * step});
     add({side: "SELL", option_type: "PE", strike: atm - 2 * step});
+    add({side: "SELL", option_type: "CE", strike: atm + 2 * step});
   } else if (kind === "iron_condor") {
     // Display order BUY-SELL-SELL-BUY (wings on the outside, shorts together in the middle) - this is
     // cosmetic only. Trade All always places BUY legs before SELL legs regardless of this list's order
@@ -801,11 +802,11 @@ function applyTemplate(kind) {
     add({side: "SELL", option_type: "CE", strike: atm, leg_role: "SHORT_CE"});
     add({side: "BUY", option_type: "CE", strike: atm + 4 * step, leg_role: "LONG_CE_WING"});
   } else if (kind === "long_straddle") {                 // volatility: profits on a big move either way
-    add({side: "BUY", option_type: "CE", strike: atm});
     add({side: "BUY", option_type: "PE", strike: atm});
+    add({side: "BUY", option_type: "CE", strike: atm});
   } else if (kind === "long_strangle") {
-    add({side: "BUY", option_type: "CE", strike: atm + 2 * step});
     add({side: "BUY", option_type: "PE", strike: atm - 2 * step});
+    add({side: "BUY", option_type: "CE", strike: atm + 2 * step});
   } else if (kind === "long_iron_condor") {              // reverse iron condor: debit, profits outside the body
     add({side: "SELL", option_type: "PE", strike: atm - 6 * step});
     add({side: "BUY", option_type: "PE", strike: atm - 2 * step});
@@ -1134,7 +1135,9 @@ function strategyCard(s) {
     // Add = more lots of this contract on a running leg; Re-buy / Re-sell = enter a closed leg again.
     // Both place a NEW leg in this strategy (its own SL/target).
     const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0;
-    const qtyText = (t.filled_qty || 0) > 0 && t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
+    const adds = t.pending_adds || [];       // Adds still resting: each its own row below, merged when it fills
+    const qtyText = adds.length ? `${t.open_qty}` :
+      (t.filled_qty || 0) > 0 && t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     const st = legStatus(t);
     return `<tr><td><span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
     <td class="sym" title="${esc(t.tradingsymbol)}">${contractName(t)}</td><td class="num">${qtyText}</td>
@@ -1149,7 +1152,13 @@ function strategyCard(s) {
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}
-      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Buy or sell this contract again">Re-enter</button>` : ""}</td></tr>`;
+      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Buy or sell this contract again">Re-enter</button>` : ""}</td></tr>
+    ${adds.map((pa) => `<tr class="add-row"><td></td><td class="sym">↳ Add <small>(merges into this leg when filled)</small></td>
+      <td class="num">${pa.qty}</td><td class="num">${num(pa.price)}</td><td></td><td></td><td></td><td></td><td></td>
+      <td><span class="leg-st ${pa.filled ? "part" : "wait"}">${pa.filled ? `Partly filled ${pa.filled}/${pa.qty}` : "Waiting for fill"}</span></td>
+      <td class="leg-actions"><button type="button" class="edit-btn" data-add-price="${t.id}" data-add-id="${pa.id}" title="Change this add order's limit price">Edit</button>
+        <button type="button" class="mkt-btn" data-add-market="${t.id}" data-add-id="${pa.id}" title="Fill this add now at the live price">Market</button>
+        <button type="button" class="leg-del" data-add-cancel="${t.id}" data-add-id="${pa.id}" title="Cancel this add (the leg keeps what it holds)">✕</button></td></tr>`).join("")}`;
   }).join("");
   const cls = s.combined_pnl >= 0 ? "pos" : "neg";
   const failedLegs = s.failed_legs || [];
@@ -1406,14 +1415,40 @@ async function legToMarket(tid) {
   } catch (e) { alertBox("Not sent to market", [e.message]); }
 }
 
+// The resting Add of a running leg: change its price, fill it at market, or cancel it.
+async function addOrder(tid, action, addId) {
+  try {
+    const t = (await api(`/api/trades/${tid}`)).trade;
+    const pa = (t.pending_adds || []).find((a) => a.id === addId);
+    if (!pa) return refreshStrategies();                    // it just filled or was cancelled
+    const what = `${t.side === "BUY" ? "Buy" : "Sell"} ${pa.qty} more ${contractName(t)}`;
+    let price = null;
+    if (action === "price") {
+      const pending = dialog("Edit the add order", `<div class="big-side ${esc(t.side)}">${what}</div>
+        <div class="edit-leg-grid"><label><span>Limit price ₹ ${ltpBtn("#add-edit-price")}</span>
+          <input id="add-edit-price" type="number" step="any" min="0" value="${pa.price}"></label></div>`, MODE === "LIVE");
+      wireLtpFill(t);
+      if (!(await pending)) return;
+      price = Number($("#add-edit-price").value);
+    } else if (action === "cancel") {
+      // cancelling a waiting add: one click, no confirmation (it only withdraws an unfilled order)
+    } else {
+      const pending = dialog("Fill the add at market?",
+        `<div class="big-side ${esc(t.side)}">${what} @ ${num(pa.price)}</div>
+         <p class="hint small">The limit moves to the live price (a marketable limit) so it fills now.</p>`, MODE === "LIVE");
+      okButton(t.side === "BUY" ? "Buy now" : "Sell now", t.side);
+      if (!(await pending)) return;
+    }
+    await api(`/api/trades/${tid}/add_order`, {action, price, add_id: addId});
+    refreshStrategies();
+  } catch (e) { alertBox("Add order not changed", [e.message]); }
+}
+
+// ✕ on a leg whose entry hasn't filled: cancel at once, no confirmation (nothing is bought or sold by cancelling;
+// confirmations are kept for exits of running positions).
 async function cancelLeg(tid) {
   try {
     const p = await api(`/api/trades/${tid}/prepare`, {action: "CANCEL"});
-    const t = p.trade;
-    const ok = await dialog("Cancel this leg?",
-      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
-       <p>Cancel the unfilled entry order - nothing has been executed on this leg yet.</p>`, MODE === "LIVE");
-    if (!ok) return;
     await api(`/api/trades/${tid}/cancel`, {token: p.token});
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
@@ -1495,6 +1530,9 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (rid) return addToLeg(Number(rid), true);
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
+  for (const [k, a] of [["addPrice", "price"], ["addMarket", "market"], ["addCancel", "cancel"]]) {
+    if (ev.target.dataset[k]) return addOrder(Number(ev.target.dataset[k]), a, Number(ev.target.dataset.addId));
+  }
   const mid = ev.target.dataset.legMarket;
   if (mid) return legToMarket(Number(mid));
   const cid = ev.target.dataset.legCancel;

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from trader import lifecycle as L
+from trader.service import ActionError
 from trader.strategy import StrategyService
 
 from .fakes import EXPIRY
@@ -152,3 +155,64 @@ def test_market_button_refuses_a_running_position(tmp_path):
     r, strat, tid, sid = one_leg(tmp_path)
     with pytest.raises(ActionError):
         r.svc.entry_to_market(tid)
+
+
+def resting_add(tmp_path):
+    r, strat, tid, sid = one_leg(tmp_path)                 # BUY 2 lots (130) @ 100, SL 90
+    r.ex.auto_match = False                                 # the add rests unfilled
+    assert strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 95})["ok"]
+    r.tick()
+    return r, strat, tid
+
+
+def test_resting_add_shows_on_the_leg_until_it_fills(tmp_path):
+    r, strat, tid = resting_add(tmp_path)
+    pa = r.svc.trade_view(tid)["pending_adds"][0]
+    assert pa and pa["qty"] == 65 and pa["price"] == 95 and pa["filled"] == 0
+    r.ex.auto_match = True
+    r.svc.update_add(tid, "market")                         # fill it now
+    v = r.svc.trade_view(tid)
+    assert v["pending_adds"] == [] and v["open_qty"] == 195 and v["quantity"] == 195
+
+
+def test_resting_add_price_can_be_changed_and_it_can_be_cancelled(tmp_path):
+    r, strat, tid = resting_add(tmp_path)
+    assert r.svc.update_add(tid, "price", 96.03)["price"] == 96.05
+    assert r.svc.trade_view(tid)["pending_adds"][0]["price"] == 96.05
+    with pytest.raises(ActionError):
+        r.svc.update_add(tid, "price", 89)                  # below the SL 90: refused
+    r.svc.update_add(tid, "cancel")
+    for _ in range(2):
+        r.tick()
+    v = r.svc.trade_view(tid)
+    assert v["pending_adds"] == [] and (v["quantity"], v["open_qty"]) == (130, 130)
+
+
+def test_several_adds_can_rest_at_different_prices_and_each_merges(tmp_path):
+    # 2026-10-08: a second, lower add was refused ("an earlier add is still working")
+    r, strat, tid = resting_add(tmp_path)                   # add #1: 65 @ 95, resting
+    assert strat.add_to_leg(tid, {"lots": 1, "price_type": "LIMIT", "entry_price": 93})["ok"]
+    r.tick()
+    adds = r.svc.trade_view(tid)["pending_adds"]
+    assert [a["price"] for a in adds] == [95, 93]
+    assert r.trade(tid)["quantity"] == 260                  # 130 held + 2 x 65 waiting
+    r.ex.auto_match = True
+    r.svc.update_add(tid, "market", add_id=adds[1]["id"])  # fill the lower one now
+    v = r.svc.trade_view(tid)
+    assert [a["price"] for a in v["pending_adds"]] == [95] and v["open_qty"] == 195
+    r.svc.update_add(tid, "cancel", add_id=adds[0]["id"])  # drop the other
+    for _ in range(2):
+        r.tick()
+    v = r.svc.trade_view(tid)
+    assert v["pending_adds"] == [] and (v["quantity"], v["open_qty"]) == (195, 195)
+
+
+def test_same_strike_twice_in_one_new_strategy_is_allowed(tmp_path):
+    r = Rig(tmp_path)
+    r.price(100)
+    strat = StrategyService(r.svc, r.repo)
+    leg = dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE", side="BUY", lots=1,
+               sl_value=10, sl_type="POINTS")
+    res = strat.create_and_trade({"config": {"order_type": "MIS"},
+                                  "legs": [{**leg, "entry_price": 100}, {**leg, "entry_price": 97}]})
+    assert res["ok"] and len(res["confirmed"]) == 2, res

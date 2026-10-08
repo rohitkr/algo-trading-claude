@@ -251,8 +251,6 @@ class TradeService:
                 raise ActionError(f"trade is {t['status']}{' (exiting)' if t['pending_exit_reason'] else ''}: "
                                   "only a running position can be added to")
             q = self._derive(t)
-            if any(is_working(o["status"]) for o in q["orders"] if o["kind"] == "ENTRY"):
-                raise ActionError("an earlier add is still working: wait for it to fill, or cancel it in Kite")
             if lots < 1:
                 raise ActionError("lots must be 1 or more")
             inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
@@ -280,7 +278,8 @@ class TradeService:
             self.audit(trade_id, "POSITION_ADD", "INFO", {"lots": lots, "qty": qty, "price": price,
                                                            "price_type": str(price_type).upper(),
                                                            "open_before": q["open"], "avg_before": q["entry_avg"]})
-            row = self.placer.place(t, "ENTRY", t["side"], qty, "LIMIT", price, purpose="ADD")
+            # several adds may rest at once (e.g. a ladder of lower buys); each merges into this trade when it fills
+            row = self.placer.place(t, "ENTRY", t["side"], qty, "LIMIT", price, purpose="ADD", allow_concurrent=True)
             if row is None:
                 raise ActionError("an entry order is already working for this trade")
             self._tick_locked()
@@ -308,6 +307,50 @@ class TradeService:
             self.apply_edit(trade_id, plan["token"])
             self._tick_locked()                                    # read the fill right away
             return {"ok": True, "price": price, "ltp": ltp, "trade": self.trade_view(trade_id)}
+
+    def update_add(self, trade_id: int, action: str, price: float | None = None, add_id: int | None = None) -> dict:
+        """A resting Add order of a running position (add_id = its order row; default the latest): change its limit
+        price ("price"), fill it now at a marketable price ("market"), or cancel it ("cancel"; the position keeps
+        what it already holds)."""
+        with self.lock:
+            t = self._get(trade_id)
+            adds = [o for o in self.repo.orders(trade_id, "ENTRY")[1:] if is_working(o["status"])]
+            if add_id is not None:
+                adds = [o for o in adds if o["id"] == add_id]
+            if not adds:
+                raise ActionError("that add order is no longer waiting (it may have just filled or been cancelled)")
+            o = adds[-1]
+            if o["status"] in LOCAL_PENDING or not o["broker_order_id"]:
+                raise ActionError("the add order is still being confirmed with Zerodha: retry in a moment")
+            if action == "cancel":
+                self.placer.cancel(o, "user cancelled the add")
+                self.audit(trade_id, "ADD_CANCELLED", "INFO", {"order_id": o["broker_order_id"]})
+                self._resync = True
+                self._tick_locked()
+                return {"ok": True, "trade": self.trade_view(trade_id)}
+            inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+        if action == "market":
+            ltp = self._ltp_safe(inst, max_age=0)
+            if not ltp:
+                raise ActionError("no live price for this contract right now: try again, or set a limit price")
+            buf = self.cfg.exit_buffer_pct / 100
+            price = round_to_tick(ltp * (1 + buf if t["side"] == "BUY" else 1 - buf), t["tick_size"], t["side"])
+        elif action == "price":
+            if not price or price <= 0:
+                raise ActionError("a limit price is required")
+            price = round(round(price / t["tick_size"]) * t["tick_size"], 2)
+        else:
+            raise ActionError("unknown action")
+        sl = t["current_sl"]
+        if sl is not None and ((t["side"] == "BUY" and price <= sl) or (t["side"] == "SELL" and price >= sl)):
+            raise ActionError(f"{price:g} is beyond this leg's stop-loss {sl:g}: the added lots would be stopped out at once")
+        with self.lock:
+            if not self.placer.modify(o, price=price):
+                raise ActionError("Zerodha did not accept the change (the order may have just filled): see the leg")
+            self.audit(trade_id, "ADD_MODIFIED", "INFO", {"order_id": o["broker_order_id"], "price": price, "how": action})
+            self._resync = True
+            self._tick_locked()
+            return {"ok": True, "price": price, "trade": self.trade_view(trade_id)}
 
     def prepare(self, trade_id: int, action: str) -> dict:
         """Token + summary for a dangerous action (EXIT / CANCEL), shown in a confirmation dialog."""
@@ -1359,6 +1402,12 @@ class TradeService:
         v["reconcile_info"] = json.loads(t["reconcile_info"]) if t["reconcile_info"] else None
         if t["entry_time"] and t["exit_time"]:
             v["duration_s"] = (datetime.fromisoformat(t["exit_time"]) - datetime.fromisoformat(t["entry_time"])).total_seconds()
+        # Adds still resting at Zerodha (each shown as its own row until it fills and merges into the position)
+        v["pending_adds"] = []
+        if t["status"] in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED):
+            v["pending_adds"] = [{"id": o["id"], "order_id": o["broker_order_id"], "qty": o["quantity"],
+                                  "filled": o["filled_qty"], "price": o["price"], "status": o["status"]}
+                                 for o in self.repo.orders(t["id"], "ENTRY")[1:] if is_working(o["status"])]
         return v
 
     def dashboard(self) -> dict:

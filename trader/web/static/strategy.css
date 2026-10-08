@@ -440,3 +440,7 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .strategy-card.st-PARTIAL { box-shadow: inset 3px 0 0 var(--warn); }
 .strategy-card.st-EXITING { box-shadow: inset 3px 0 0 var(--warn); }
 .leg-st.part { color: var(--warn); }
+
+/* a resting Add shown under its leg until it fills */
+.legs-live tr.add-row td { padding-top: 2px; padding-bottom: 6px; border-top: 0; }
+.legs-live tr.add-row td.sym { color: var(--muted); }

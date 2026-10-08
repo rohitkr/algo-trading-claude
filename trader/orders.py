@@ -29,9 +29,10 @@ class OrderPlacer:
         return [o for o in self.repo.orders(trade_id, kind) if is_working(o["status"])]
 
     def place(self, trade: dict, kind: str, side: str, qty: int, order_type: str, price: float | None,
-              trigger: float | None = None, purpose: str | None = None) -> dict | None:
-        """Returns the order row (SUBMITTED or UNCERTAIN), or None when refused as a duplicate."""
-        dup = self.working(trade["id"], kind)
+              trigger: float | None = None, purpose: str | None = None, allow_concurrent: bool = False) -> dict | None:
+        """Returns the order row (SUBMITTED or UNCERTAIN), or None when refused as a duplicate. allow_concurrent:
+        an extra order of this kind on purpose (adds to a running position: several may rest at different prices)."""
+        dup = [] if allow_concurrent else self.working(trade["id"], kind)
         if dup:
             self.audit(trade["id"], "DUPLICATE_PREVENTED", "WARNING",
                        {"kind": kind, "existing": [(o["tag"], o["broker_order_id"], o["status"]) for o in dup]})
