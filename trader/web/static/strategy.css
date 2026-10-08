@@ -1,5 +1,5 @@
 /* Strategy Builder theme - dark by default, light on [data-theme="light"]. Scoped to this page only;
-   the single-trade page (style.css) is untouched. */
+   the app's only page. */
 :root {
   --bg: #0f1115; --card: #1a1d24; --card2: #20242e; --fg: #e6e8ec; --muted: #8a90a0; --line: #2a2f3a;
   --buy-blue: #2f6fed; --sell-orange: #ff7a45; --buy: #22c55e; --sell: #ef4444;

@@ -174,12 +174,18 @@ def test_trading_mode_mixup_is_explained(tmp_path):
 
 
 def test_ui_has_no_nested_form_in_dialog_and_no_typed_live():
-    """Regression: the edit form was a <form> inside the dialog's <form>; browsers drop it and Edit did nothing."""
+    """Regression: an edit form was a <form> inside the dialog's <form>; browsers drop it and Edit did nothing."""
     from pathlib import Path
-    js = (Path(__file__).parents[1] / "web" / "static" / "app.js").read_text()
-    html = (Path(__file__).parents[1] / "web" / "static" / "index.html").read_text()
-    assert '<form id="edit-form"' not in js and '<div id="edit-form"' in js
+    js = (Path(__file__).parents[1] / "web" / "static" / "strategy.js").read_text()
+    html = (Path(__file__).parents[1] / "web" / "static" / "strategy.html").read_text()
+    assert "<form" not in js and '<div id="leg-edit-form"' in js
     assert "dlg-live-input" not in js and "dlg-live-input" not in html
+
+
+def test_root_opens_the_strategy_builder(web):
+    r, base = web
+    code, body = call(base, "/")
+    assert code == 200 and b"Strategy Builder" in body
 
 
 def test_ui_answers_to_a_localhost_name_but_not_other_hosts(web):

@@ -863,7 +863,7 @@ function collectConfig() {
   return cfg;
 }
 
-// ---------------------------------------------------------------- dialogs (mirrors app.js)
+// ---------------------------------------------------------------- dialogs
 function dialog(title, html, live = false) {
   const d = $("#dlg");
   $("#dlg-title").textContent = title;

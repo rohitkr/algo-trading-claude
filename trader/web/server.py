@@ -70,9 +70,7 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             svc = app.service
             try:
-                if u.path in ("/", "/index.html"):
-                    return self._file("index.html")
-                if u.path in ("/strategy", "/strategy.html"):
+                if u.path in ("/", "/index.html", "/strategy", "/strategy.html"):   # the one UI: Strategy Builder
                     return self._file("strategy.html")
                 if u.path.startswith("/static/"):
                     return self._file(u.path[len("/static/"):])
