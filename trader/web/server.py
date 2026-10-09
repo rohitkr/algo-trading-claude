@@ -72,6 +72,14 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             try:
                 if u.path in ("/", "/index.html", "/strategy", "/strategy.html"):   # the one UI: Strategy Builder
                     return self._file("strategy.html")
+                if u.path in ("/telegram", "/telegram.html"):
+                    return self._file("telegram.html")
+                if u.path == "/api/telegram/feed":
+                    tg = getattr(app, "telegram", None)
+                    if tg is None:
+                        return self._json(200, {"status": {"state": "off", "detail": "Telegram feed not available"},
+                                                "signals": [], "messages": [], "stored": 0})
+                    return self._json(200, tg.view(show_ticks=q.get("ticks") == "1"))
                 if u.path.startswith("/static/"):
                     return self._file(u.path[len("/static/"):])
                 if u.path == "/api/meta":
@@ -175,7 +183,8 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if m:
                     return self._json(200, svc.update_add(int(m.group(1)), str(body.get("action") or ""),
                                                           float(body["price"]) if body.get("price") not in (None, "") else None,
-                                                          int(body["add_id"]) if body.get("add_id") not in (None, "") else None))
+                                                          int(body["add_id"]) if body.get("add_id") not in (None, "") else None,
+                                                          int(body["lots"]) if body.get("lots") not in (None, "") else None))
                 m = re.fullmatch(r"/api/trades/(\d+)/entry_market", u.path)
                 if m:
                     return self._json(200, svc.entry_to_market(int(m.group(1))))

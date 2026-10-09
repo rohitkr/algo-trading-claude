@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     mon = Monitor(app.service, cfg.poll_seconds, after_tick=app.hub.after_tick, fast_s=cfg.fast_poll_seconds)
     app.hub.start()
     mon.start()
+    if app.telegram is not None:
+        app.telegram.start()                       # read-only tips feed for /telegram (no trading)
     banner = "LIVE TRADING - REAL ORDERS" if cfg.live else "PAPER (simulated exchange)"
     names = "".join(f" or http://{n}:{port}" for n in cfg.hostnames)
     print(f"\n  {banner}\n  Open http://127.0.0.1:{port}{names}  (Ctrl-C stops; resting SL orders stay at Zerodha)\n")
@@ -84,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         mon.stop()
         app.hub.stop()
+        if app.telegram is not None:
+            app.telegram.stop()
         if app.stream is not None:
             app.stream.stop()
         srv.server_close()

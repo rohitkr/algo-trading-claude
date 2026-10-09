@@ -308,10 +308,11 @@ class TradeService:
             self._tick_locked()                                    # read the fill right away
             return {"ok": True, "price": price, "ltp": ltp, "trade": self.trade_view(trade_id)}
 
-    def update_add(self, trade_id: int, action: str, price: float | None = None, add_id: int | None = None) -> dict:
+    def update_add(self, trade_id: int, action: str, price: float | None = None, add_id: int | None = None,
+                   lots: int | None = None) -> dict:
         """A resting Add order of a running position (add_id = its order row; default the latest): change its limit
-        price ("price"), fill it now at a marketable price ("market"), or cancel it ("cancel"; the position keeps
-        what it already holds)."""
+        price and/or lots ("price"), fill it now at a marketable price ("market"), or cancel it ("cancel"; the
+        position keeps what it already holds)."""
         with self.lock:
             t = self._get(trade_id)
             adds = [o for o in self.repo.orders(trade_id, "ENTRY")[1:] if is_working(o["status"])]
@@ -344,10 +345,22 @@ class TradeService:
         sl = t["current_sl"]
         if sl is not None and ((t["side"] == "BUY" and price <= sl) or (t["side"] == "SELL" and price >= sl)):
             raise ActionError(f"{price:g} is beyond this leg's stop-loss {sl:g}: the added lots would be stopped out at once")
+        changes = {"price": price}
+        if lots is not None and action == "price":
+            qty = int(lots) * t["lot_size"]
+            if lots < 1:
+                raise ActionError("lots must be 1 or more")
+            if qty < (o["filled_qty"] or 0):
+                raise ActionError(f"{o['filled_qty']} of this add already filled: lots can't go below that")
+            freeze = self.cfg.freeze_for(t["underlying"])
+            if qty > freeze:
+                raise ActionError(f"{qty} units is above the {t['underlying']} freeze limit {freeze}")
+            if qty != o["quantity"]:
+                changes["quantity"] = qty
         with self.lock:
-            if not self.placer.modify(o, price=price):
+            if not self.placer.modify(o, **changes):
                 raise ActionError("Zerodha did not accept the change (the order may have just filled): see the leg")
-            self.audit(trade_id, "ADD_MODIFIED", "INFO", {"order_id": o["broker_order_id"], "price": price, "how": action})
+            self.audit(trade_id, "ADD_MODIFIED", "INFO", {"order_id": o["broker_order_id"], **changes, "how": action})
             self._resync = True
             self._tick_locked()
             return {"ok": True, "price": price, "trade": self.trade_view(trade_id)}

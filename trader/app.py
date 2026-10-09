@@ -35,6 +35,7 @@ class App:
     strategies: StrategyService
     stream: object = None          # marketdata.KiteStream (MARKET_DATA_PROVIDER=KITE), else None
     hub: object = None             # trader.stream.TickHub: pushes ticks / dashboard changes to the pages
+    telegram: object = None        # telegram_signals.feed.SignalFeed: the tips channel (read-only), /telegram page
 
 
 def single_instance_lock(db_path: Path):
@@ -120,7 +121,14 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist, mcfg=None) -> App
     strategies = StrategyService(svc, repo)
     svc.extra_tick = strategies.tick        # combined-P&L rules run right after the per-trade engine, every tick
     from .stream import TickHub
-    return App(cfg, svc, repo, paper, quotes, lock, strategies, stream, TickHub(svc, quotes))
+    app = App(cfg, svc, repo, paper, quotes, lock, strategies, stream, TickHub(svc, quotes))
+    try:                                   # the Telegram feed is optional and never blocks the trader from starting
+        from telegram_signals.config import TelegramConfig
+        from telegram_signals.feed import SignalFeed
+        app.telegram = SignalFeed(TelegramConfig.from_env())
+    except Exception as exc:               # noqa: BLE001
+        log.warning("telegram feed unavailable: %s", exc)
+    return app
 
 
 def _spot_token(instruments: InstrumentService, underlying: str) -> int:

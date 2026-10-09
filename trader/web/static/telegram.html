@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegram Signals</title>
+<link rel="stylesheet" href="/static/strategy.css">
+<link rel="stylesheet" href="/static/telegram.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Telegram Signals <span id="feed-state" class="mode-pill">…</span></h1>
+  <div class="topbar-right">
+    <span id="feed-channel" class="hint small"></span>
+    <a class="navlink" href="/">Strategy Builder →</a>
+    <button type="button" id="theme-toggle" title="Switch light/dark">🌙</button>
+  </div>
+</header>
+<p id="feed-detail" class="feed-detail hidden"></p>
+
+<main class="tg-main">
+  <section class="panel">
+    <div class="tg-head">
+      <h2>Signals <span id="sig-count" class="hint small"></span></h2>
+      <span class="hint small">Read-only: nothing here trades. Direction = what the tip implies (BUY CE → bullish, BUY PE → bearish).</span>
+    </div>
+    <div class="tg-scroll">
+      <table class="tg-signals">
+        <thead><tr><th>Time</th><th>Direction</th><th>Tip</th><th class="num">Entry</th><th class="num">SL</th>
+          <th>Targets</th><th>Status</th><th class="num">Last</th><th>Rationale</th></tr></thead>
+        <tbody id="sig-body"><tr><td colspan="9" class="hint small">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="tg-head">
+      <h2>Messages</h2>
+      <label class="inline-check"><input type="checkbox" id="show-ticks"> Show price ticks</label>
+    </div>
+    <div class="tg-scroll">
+      <table class="tg-msgs">
+        <thead><tr><th>Time</th><th>Read as</th><th>Message</th><th>Signal</th></tr></thead>
+        <tbody id="msg-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script src="/static/telegram.js"></script>
+</body>
+</html>

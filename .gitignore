@@ -26,3 +26,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Telegram signals: session = a login to your Telegram account; never commit
+data/telegram/
+*.session

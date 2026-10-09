@@ -1422,14 +1422,19 @@ async function addOrder(tid, action, addId) {
     const pa = (t.pending_adds || []).find((a) => a.id === addId);
     if (!pa) return refreshStrategies();                    // it just filled or was cancelled
     const what = `${t.side === "BUY" ? "Buy" : "Sell"} ${pa.qty} more ${contractName(t)}`;
-    let price = null;
+    let price = null, lots = null;
     if (action === "price") {
       const pending = dialog("Edit the add order", `<div class="big-side ${esc(t.side)}">${what}</div>
-        <div class="edit-leg-grid"><label><span>Limit price ₹ ${ltpBtn("#add-edit-price")}</span>
-          <input id="add-edit-price" type="number" step="any" min="0" value="${pa.price}"></label></div>`, MODE === "LIVE");
+        <div class="edit-leg-grid">
+          <label>Lots ${pa.filled ? `<small class="hint">(${pa.filled} qty already filled)</small>` : ""}
+            <input id="add-edit-lots" type="number" min="1" step="1" value="${Math.round(pa.qty / t.lot_size)}"></label>
+          <label><span>Limit price ₹ ${ltpBtn("#add-edit-price")}</span>
+            <input id="add-edit-price" type="number" step="any" min="0" value="${pa.price}"></label></div>`, MODE === "LIVE");
       wireLtpFill(t);
+      okButton("Save");
       if (!(await pending)) return;
       price = Number($("#add-edit-price").value);
+      lots = Math.floor(Number($("#add-edit-lots").value)) || null;
     } else if (action === "cancel") {
       // cancelling a waiting add: one click, no confirmation (it only withdraws an unfilled order)
     } else {
@@ -1439,7 +1444,7 @@ async function addOrder(tid, action, addId) {
       okButton(t.side === "BUY" ? "Buy now" : "Sell now", t.side);
       if (!(await pending)) return;
     }
-    await api(`/api/trades/${tid}/add_order`, {action, price, add_id: addId});
+    await api(`/api/trades/${tid}/add_order`, {action, price, lots, add_id: addId});
     refreshStrategies();
   } catch (e) { alertBox("Add order not changed", [e.message]); }
 }

@@ -216,3 +216,17 @@ def test_same_strike_twice_in_one_new_strategy_is_allowed(tmp_path):
     res = strat.create_and_trade({"config": {"order_type": "MIS"},
                                   "legs": [{**leg, "entry_price": 100}, {**leg, "entry_price": 97}]})
     assert res["ok"] and len(res["confirmed"]) == 2, res
+
+
+def test_resting_add_lots_can_be_changed(tmp_path):
+    # 2026-10-09: the add's Edit only changed the price
+    r, strat, tid = resting_add(tmp_path)                   # add 1 lot (65) @ 95 resting; 130 held
+    add = r.svc.trade_view(tid)["pending_adds"][0]
+    r.svc.update_add(tid, "price", 94, add_id=add["id"], lots=3)
+    r.tick()
+    v = r.svc.trade_view(tid)
+    assert (v["pending_adds"][0]["qty"], v["pending_adds"][0]["price"]) == (195, 94)
+    assert v["quantity"] == 130 + 195 and v["open_qty"] == 130
+    r.ex.auto_match = True
+    r.svc.update_add(tid, "market", add_id=add["id"])
+    assert r.svc.trade_view(tid)["open_qty"] == 325

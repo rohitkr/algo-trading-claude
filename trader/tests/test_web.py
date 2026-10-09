@@ -195,3 +195,11 @@ def test_ui_answers_to_a_localhost_name_but_not_other_hosts(web):
     assert call(base, "/api/dashboard", headers={"Host": f"algo.local:{port}"})[0] == 200       # default name
     assert call(base, "/api/dashboard", headers={"Host": f"algotrade.com:{port}"})[0] == 403   # not configured
     assert call(base, "/api/dashboard", headers={"Host": f"evil.localhost.example:{port}"})[0] == 403
+
+
+def test_telegram_page_and_feed_without_telegram(web):
+    r, base = web
+    code, body = call(base, "/telegram")
+    assert code == 200 and b"Telegram Signals" in body
+    code, d = call(base, "/api/telegram/feed")
+    assert code == 200 and d["status"]["state"] == "off" and d["signals"] == []
