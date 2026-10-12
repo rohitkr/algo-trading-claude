@@ -450,3 +450,20 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 #exit-price.inactive { opacity: .45; border-style: dashed; cursor: pointer; }
 label.inactive > span { opacity: .55; }
 #exit-price:not(.inactive) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+/* fixed header: the page scrolls under "Strategy Builder ● LIVE" */
+.topbar { position: sticky; top: 0; z-index: 30; background: var(--bg); }
+.halt { position: sticky; top: 52px; z-index: 29; }
+/* Zerodha / Breeze connection lights */
+.conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted);
+  padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; cursor: default; }
+.conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.conn.on i { background: var(--buy); box-shadow: 0 0 6px var(--buy); }
+.conn.bad i { background: var(--sell); box-shadow: 0 0 6px var(--sell); }
+.conn.bad { color: var(--sell); border-color: var(--sell); }
+.conn.off { opacity: .6; }
+
+/* Scroll bars like macOS's default (shown only while scrolling), even when the Mac is set to "always show scroll
+   bars": thin and invisible at rest; .is-scrolling (set for ~1 s by the page script on each scroll) shows them. */
+html, body, * { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+html.is-scrolling, .is-scrolling { scrollbar-color: rgba(127, 127, 127, .55) transparent; }

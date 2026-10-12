@@ -148,3 +148,15 @@ $("#sig-body").addEventListener("click", async (e) => {
   catch (err) { window.alert(err.message); }
   last = ""; refresh();
 }, true);
+
+// Scroll bars show only while scrolling (see strategy.css): mark whatever is being scrolled for ~1 s.
+{
+  const timers = new WeakMap();
+  document.addEventListener("scroll", (e) => {
+    const el = e.target === document ? document.documentElement : e.target;
+    if (!el.classList) return;
+    el.classList.add("is-scrolling");
+    clearTimeout(timers.get(el));
+    timers.set(el, setTimeout(() => el.classList.remove("is-scrolling"), 900));
+  }, {capture: true, passive: true});
+}

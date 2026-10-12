@@ -1530,6 +1530,29 @@ async function cancelLeg(tid) {
   } catch (e) { alertBox("Error", [e.message]); }
 }
 
+// Zerodha / Breeze lights in the header: green = working, red = a problem (the reason on hover), grey = not used.
+let LAST_DASH = null;
+function renderConnections(d) {
+  LAST_DASH = d;
+  const set = (id, state, tip) => { const el = $(id); el.className = `conn ${state}`; el.title = tip; };
+  const ageS = (iso) => (iso && d.now ? (new Date(d.now) - new Date(iso)) / 1000 : null);
+  const b = d.system?.broker?.value || {};
+  if (d.broker === "paper") set("#conn-zerodha", "off", "Zerodha: not used (PAPER mode: simulated exchange)");
+  else {
+    const age = ageS(b.last_sync);
+    const ok = b.ok && age != null && age < 75;           // the page refreshes this every 30 s
+    const stream = d.quotes?.source === "kite" ? ` · Kite price feed ${d.quotes.ok ? "live" : "NOT live" + (d.quotes.session_expired ? " (login expired)" : "")}` : "";
+    set("#conn-zerodha", ok ? "on" : "bad", ok ? `Zerodha connected · last sync ${b.last_sync.slice(11)}${stream}`
+      : `Zerodha: ${b.last_error || (age == null ? "no sync yet" : `no sync for ${Math.round(age)}s`)}${stream}`);
+  }
+  const q = d.quotes || {};
+  const br = q.source === "breeze" ? q : q.fallback?.source === "breeze" ? q.fallback : null;
+  if (!br) set("#conn-breeze", "off", "Breeze: not used (prices come from Kite)");
+  else set("#conn-breeze", br.ok ? "on" : "bad", br.ok
+    ? `Breeze connected${br.api_budget_remaining != null ? ` · ${br.api_budget_remaining} calls left today` : ""}${q.fallback ? " · used as backup for Kite prices" : ""}`
+    : `Breeze: ${br.last_error || "not working"}`);
+}
+
 // Running strategies are always listed first; finished ones are history, filtered by date and paged.
 let STRATEGIES = [];
 const STRAT_FILTER = HistoryFilter.create($("#strategies-filter"), "strategies", () => renderStrategies());
@@ -1576,6 +1599,7 @@ function renderStrategies() {
 async function refreshStrategies() {
   let d;
   try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "offline"; $("#banner").title = "Server unreachable: " + e.message; return; }
+  renderConnections(d);
   const b = $("#banner");                                  // small LIVE / PAPER pill next to the title
   b.className = "mode-pill" + (d.live ? " live" : "");
   b.textContent = d.live ? "● LIVE" : "PAPER";
@@ -1729,4 +1753,16 @@ setInterval(refreshStrategies, 30000);
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(renderPayoff);
   }).observe($("#payoff-chart"));
+}
+
+// Scroll bars show only while scrolling (see strategy.css): mark whatever is being scrolled for ~1 s.
+{
+  const timers = new WeakMap();
+  document.addEventListener("scroll", (e) => {
+    const el = e.target === document ? document.documentElement : e.target;
+    if (!el.classList) return;
+    el.classList.add("is-scrolling");
+    clearTimeout(timers.get(el));
+    timers.set(el, setTimeout(() => el.classList.remove("is-scrolling"), 900));
+  }, {capture: true, passive: true});
 }
