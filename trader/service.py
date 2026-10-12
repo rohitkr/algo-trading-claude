@@ -1532,12 +1532,27 @@ class TradeService:
                                  for o in self.repo.orders(t["id"], "ENTRY")[1:] if is_working(o["status"])]
         return v
 
+    def breeze_login(self) -> dict:
+        """Today's Breeze login (the session file `python -m trading_data login` writes), for the header light -
+        separate from whether live prices use Breeze (MARKET_DATA_FALLBACK=BREEZE / MARKET_DATA_PROVIDER=BREEZE)."""
+        try:
+            from trading_data.breeze.session_store import load_session
+            from trading_data.config import load_settings
+            s = load_session(load_settings().paths.session_file)
+        except Exception as exc:                       # noqa: BLE001 (no Breeze config at all: just "not set up")
+            return {"logged_in_today": False, "detail": f"Breeze not set up: {exc}"}
+        if s is None:
+            return {"logged_in_today": False, "detail": "no Breeze login saved"}
+        return {"logged_in_today": s.is_current(), "created_on": s.created_on.isoformat(),
+                "detail": "" if s.is_current() else f"last login {s.created_on:%d %b}: log in again for today"}
+
     def dashboard(self) -> dict:
         with self.lock:
             active = [self._view(t) for t in self.repo.trades(L.OPEN_STATUSES)]
             done = [self._view(t) for t in self.repo.trades(L.TERMINAL - {L.EXPIRED}, limit=500)]   # UI filters/pages these
             st = self.repo.status_values()
             return {"mode": self.cfg.mode, "live": self.cfg.live, "now": self.repo.now(), "active": active,
+                    "breeze_login": self.breeze_login(),
                     "completed": done, "halted": self.halted(),
                     "system": {k: v for k, v in st.items() if k != "halt"},
                     "quotes": self.quotes.status(), "broker": self.broker.name,

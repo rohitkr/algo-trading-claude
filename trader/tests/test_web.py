@@ -203,3 +203,9 @@ def test_telegram_page_and_feed_without_telegram(web):
     assert code == 200 and b"Telegram Signals" in body
     code, d = call(base, "/api/telegram/feed")
     assert code == 200 and d["status"]["state"] == "off" and d["signals"] == []
+
+
+def test_dashboard_reports_the_breeze_login_for_the_header_light(web):
+    r, base = web
+    code, d = call(base, "/api/dashboard")
+    assert code == 200 and "logged_in_today" in d["breeze_login"]

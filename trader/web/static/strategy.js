@@ -1545,12 +1545,15 @@ function renderConnections(d) {
     set("#conn-zerodha", ok ? "on" : "bad", ok ? `Zerodha connected · last sync ${b.last_sync.slice(11)}${stream}`
       : `Zerodha: ${b.last_error || (age == null ? "no sync yet" : `no sync for ${Math.round(age)}s`)}${stream}`);
   }
+  // Breeze: green = logged in today (and, if it serves prices, working); red = not logged in today, or failing
   const q = d.quotes || {};
   const br = q.source === "breeze" ? q : q.fallback?.source === "breeze" ? q.fallback : null;
-  if (!br) set("#conn-breeze", "off", "Breeze: not used (prices come from Kite)");
-  else set("#conn-breeze", br.ok ? "on" : "bad", br.ok
-    ? `Breeze connected${br.api_budget_remaining != null ? ` · ${br.api_budget_remaining} calls left today` : ""}${q.fallback ? " · used as backup for Kite prices" : ""}`
-    : `Breeze: ${br.last_error || "not working"}`);
+  const login = d.breeze_login || {};
+  const role = br ? (q.fallback ? "backup for Kite prices" : "live prices") : "not used for live prices (MARKET_DATA_FALLBACK isn't BREEZE); used for history / backtests";
+  if (br && !br.ok) set("#conn-breeze", "bad", `Breeze: ${br.last_error || "not working"}`);
+  else if (login.logged_in_today) set("#conn-breeze", "on", `Breeze logged in today · ${role}` +
+    (br && br.api_budget_remaining != null ? ` · ${br.api_budget_remaining} calls left` : ""));
+  else set("#conn-breeze", "bad", `Breeze: ${login.detail || "not logged in today"} · ${role}`);
 }
 
 // Running strategies are always listed first; finished ones are history, filtered by date and paged.
@@ -1753,16 +1756,4 @@ setInterval(refreshStrategies, 30000);
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(renderPayoff);
   }).observe($("#payoff-chart"));
-}
-
-// Scroll bars show only while scrolling (see strategy.css): mark whatever is being scrolled for ~1 s.
-{
-  const timers = new WeakMap();
-  document.addEventListener("scroll", (e) => {
-    const el = e.target === document ? document.documentElement : e.target;
-    if (!el.classList) return;
-    el.classList.add("is-scrolling");
-    clearTimeout(timers.get(el));
-    timers.set(el, setTimeout(() => el.classList.remove("is-scrolling"), 900));
-  }, {capture: true, passive: true});
 }

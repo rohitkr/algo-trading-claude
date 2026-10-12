@@ -451,9 +451,13 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 label.inactive > span { opacity: .55; }
 #exit-price:not(.inactive) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 
-/* fixed header: the page scrolls under "Strategy Builder ● LIVE" */
-.topbar { position: sticky; top: 0; z-index: 30; background: var(--bg); }
-.halt { position: sticky; top: 52px; z-index: 29; }
+/* header: scrolls away with the page, then slides down and stays pinned once you are past it (page.js) */
+.topbar { position: relative; z-index: 30; background: var(--bg); }
+.topbar.stuck { position: fixed; top: 0; left: 0; right: 0; z-index: 40; border-bottom-color: transparent;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35); animation: header-slide-in .28s ease-out; }
+body.header-stuck { padding-top: var(--hdr-h, 64px); }
+@keyframes header-slide-in { from { transform: translateY(-100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .topbar.stuck { animation: none; } }
 /* Zerodha / Breeze connection lights */
 .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted);
   padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; cursor: default; }
