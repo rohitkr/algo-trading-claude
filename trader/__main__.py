@@ -75,7 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     app.hub.start()
     mon.start()
     if app.telegram is not None:
-        app.telegram.start()                       # read-only tips feed for /telegram (no trading)
+        app.telegram.start()                       # the tips feed for /telegram
+        if getattr(app.telegram, "trader", None) is not None:
+            app.telegram.trader.start()            # acts on NEW signals per your rules (mode starts as "alert")
     banner = "LIVE TRADING - REAL ORDERS" if cfg.live else "PAPER (simulated exchange)"
     names = "".join(f" or http://{n}:{port}" for n in cfg.hostnames)
     print(f"\n  {banner}\n  Open http://127.0.0.1:{port}{names}  (Ctrl-C stops; resting SL orders stay at Zerodha)\n")
@@ -88,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         app.hub.stop()
         if app.telegram is not None:
             app.telegram.stop()
+            if getattr(app.telegram, "trader", None) is not None:
+                app.telegram.trader.stop()
         if app.stream is not None:
             app.stream.stop()
         srv.server_close()

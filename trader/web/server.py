@@ -179,6 +179,13 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             try:
                 if u.path == "/api/preview":
                     return self._json(200, svc.preview(body))
+                m = re.fullmatch(r"/api/trades/(\d+)/limit_exit", u.path)
+                if m:
+                    tid, act = int(m.group(1)), str(body.get("action") or "place")
+                    px = float(body["price"]) if body.get("price") not in (None, "") else None
+                    if act == "place":
+                        return self._json(200, svc.limit_exit(tid, int(body.get("qty") or 0), px))
+                    return self._json(200, svc.update_limit_exit(tid, act, px))
                 m = re.fullmatch(r"/api/trades/(\d+)/add_order", u.path)
                 if m:
                     return self._json(200, svc.update_add(int(m.group(1)), str(body.get("action") or ""),
@@ -221,6 +228,19 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path == "/api/resume":
                     svc.resume()
                     return self._json(200, {"ok": True})
+                if u.path in ("/api/telegram/rules", "/api/telegram/approve", "/api/telegram/skip"):
+                    tr = getattr(getattr(app, "telegram", None), "trader", None)
+                    if tr is None:
+                        return self._json(409, {"error": "Telegram trading is not available"})
+                    try:
+                        if u.path == "/api/telegram/rules":
+                            from dataclasses import asdict
+                            return self._json(200, {"ok": True, "rules": asdict(tr.save_rules(dict(body)))})
+                        sid = int(body.get("signal_id") or 0)
+                        res = tr.approve(sid) if u.path.endswith("approve") else tr.skip(sid)
+                        return self._json(200, {"ok": True, "action": res})
+                    except ValueError as exc:
+                        return self._json(400, {"error": str(exc)})
                 if u.path == "/api/strategies/margin":
                     return self._json(200, app.strategies.margin(body))
                 if u.path == "/api/strategies/trade_all":

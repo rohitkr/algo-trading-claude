@@ -27,6 +27,7 @@ class SignalFeed:
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
+        self.trader = None                     # telegram_signals.trading.SignalTrader, set by the trader app
 
     # -- lifecycle -------------------------------------------------------------------------------------
     def start(self) -> None:
@@ -104,8 +105,22 @@ class SignalFeed:
         rows = self.store.recent(limit)
         signals, messages = build_signals(rows)
         msgs = [m for m in reversed(messages) if show_ticks or m["kind"] != TICK]
-        return {"status": dict(self.status),
-                "signals": sorted(signals.values(), key=lambda s: s["date"], reverse=True),
+        out_signals = sorted(signals.values(), key=lambda s: s["date"], reverse=True)
+        trading = None
+        if self.trader is not None:
+            from dataclasses import asdict
+            rules = self.trader.rules()
+            example = None
+            if out_signals:
+                try:
+                    example = {"signal": out_signals[0]["id"], **{k: v for k, v in self.trader.plan(out_signals[0], rules).items()
+                                                                 if k == "summary"}}
+                except Exception as exc:                  # noqa: BLE001
+                    example = {"signal": out_signals[0]["id"], "summary": f"no plan: {exc}"}
+            trading = {"rules": asdict(rules), "actions": {str(k): v for k, v in self.store.actions().items()},
+                       "example": example}
+        return {"status": dict(self.status), "trading": trading,
+                "signals": out_signals,
                 "messages": [{k: m[k] for k in ("msg_id", "date", "text", "reply_to", "has_media", "kind",
                                                 "parsed", "signal_id")} for m in msgs[:400]],
                 "stored": self.store.count()}

@@ -18,16 +18,57 @@
 </header>
 <p id="feed-detail" class="feed-detail hidden"></p>
 
+<section class="panel tg-trading" id="trading-panel">
+  <div class="tg-head">
+    <h2>Trading on signals</h2>
+    <div class="mode-seg" id="mode-seg" role="radiogroup" aria-label="Mode">
+      <button type="button" data-mode="off">Off</button><button type="button" data-mode="alert">Alert</button>
+      <button type="button" data-mode="approve">Approve</button><button type="button" data-mode="auto">Auto</button>
+    </div>
+  </div>
+  <p class="hint small" id="mode-help"></p>
+  <form id="rules-form" class="rules-grid">
+    <label>Trade as
+      <select name="action"><option value="sell_opposite">Sell the opposite option</option>
+        <option value="credit_spread">Credit spread</option><option value="follow">Follow the tip (buy)</option></select></label>
+    <label title="Strikes away from the tip's strike, out of the money for the option you sell (0 = same strike)">Strike offset
+      <input name="strike_offset" type="number" min="0" step="1"></label>
+    <label title="Credit spread: strikes between the sold option and the bought hedge">Spread width (strikes)
+      <input name="spread_width" type="number" min="1" step="1"></label>
+    <label>NIFTY lots <input name="lots_NIFTY" type="number" min="1" step="1"></label>
+    <label>SENSEX lots <input name="lots_SENSEX" type="number" min="1" step="1"></label>
+    <label title="Stop-loss on the sold option, in premium points (blank = automatic wide stop)">Leg SL (points)
+      <input name="leg_sl_points" type="number" min="0" step="any" placeholder="auto"></label>
+    <label>Max loss ₹ <input name="max_loss" type="number" min="0" step="1" placeholder="off"></label>
+    <label>Max profit ₹ <input name="max_profit" type="number" min="0" step="1" placeholder="off"></label>
+    <label>Order type <select name="order_type"><option>MIS</option><option>CNC</option><option>BTST</option></select></label>
+    <label>From <input name="start" type="time"></label>
+    <label>Until <input name="end" type="time"></label>
+    <label>Max trades / day <input name="max_trades_per_day" type="number" min="0" step="1"></label>
+    <label title="Signals older than this are never traded (e.g. messages read after a restart)">Max signal age (s)
+      <input name="max_signal_age_s" type="number" min="10" step="1"></label>
+    <label title="Approve mode: a proposal expires after this many seconds">Approve within (s)
+      <input name="approve_timeout_s" type="number" min="10" step="1"></label>
+    <label class="inline-check"><input name="idx_NIFTY" type="checkbox"> NIFTY</label>
+    <label class="inline-check"><input name="idx_SENSEX" type="checkbox"> SENSEX</label>
+    <label class="inline-check" title="Their STOP LOSS HIT message squares off our trade for that signal">
+      <input name="exit_on_channel_sl" type="checkbox"> Exit when they post SL hit</label>
+    <div class="rules-actions"><button type="submit" class="primary" id="rules-save">Save rules</button>
+      <span id="rules-msg" class="hint small"></span></div>
+  </form>
+  <p class="hint small" id="rules-example"></p>
+</section>
+
 <main class="tg-main">
   <section class="panel">
     <div class="tg-head">
       <h2>Signals <span id="sig-count" class="hint small"></span></h2>
-      <span class="hint small">Read-only: nothing here trades. Direction = what the tip implies (BUY CE → bullish, BUY PE → bearish).</span>
+      <span class="hint small">Direction = what the tip implies (BUY CE → bullish, BUY PE → bearish).</span>
     </div>
     <div class="tg-scroll">
       <table class="tg-signals">
         <thead><tr><th>Time</th><th>Direction</th><th>Tip</th><th class="num">Entry</th><th class="num">SL</th>
-          <th>Targets</th><th>Status</th><th class="num">Last</th><th>Rationale</th></tr></thead>
+          <th>Targets</th><th>Status</th><th class="num">Last</th><th>Our trade</th></tr></thead>
         <tbody id="sig-body"><tr><td colspan="9" class="hint small">Loading…</td></tr></tbody>
       </table>
     </div>

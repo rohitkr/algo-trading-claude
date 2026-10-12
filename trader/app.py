@@ -126,6 +126,8 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist, mcfg=None) -> App
         from telegram_signals.config import TelegramConfig
         from telegram_signals.feed import SignalFeed
         app.telegram = SignalFeed(TelegramConfig.from_env())
+        from telegram_signals.trading import SignalTrader
+        app.telegram.trader = SignalTrader(app.telegram.store, strategies, svc)   # signal -> your trade (phase 3)
     except Exception as exc:               # noqa: BLE001
         log.warning("telegram feed unavailable: %s", exc)
     return app

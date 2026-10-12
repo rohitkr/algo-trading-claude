@@ -42,7 +42,8 @@ function render(d) {
     <td>${(s.targets || []).map((t, i) => `<span class="tgt ${(s.targets_done || []).includes(i + 1) ? "done" : ""}">${num(t)}</span>`).join("")}</td>
     <td><span class="st ${s.status}">${STATUS_TEXT[s.status] || s.status}</span>${s.complete ? "" : ' <small class="hint">(no SL yet)</small>'}</td>
     <td class="num">${num(s.last_price)}</td>
-    <td>${esc(s.rationale || "")}</td></tr>`).join("") || `<tr><td colspan="9" class="hint small">No signals yet.</td></tr>`;
+    <td>${ourTrade(s, d.trading)}</td></tr>`).join("") || `<tr><td colspan="9" class="hint small">No signals yet.</td></tr>`;
+  renderTrading(d.trading);
 
   $("#msg-body").innerHTML = d.messages.map((m) => `<tr class="${selected && m.signal_id === selected ? "sel" : ""}">
     <td>${ist(m.date, true)}</td>
@@ -70,3 +71,80 @@ $("#sig-body").addEventListener("click", (e) => {
 $("#show-ticks").addEventListener("change", () => { last = ""; refresh(); });
 refresh();
 setInterval(refresh, 5000);
+
+
+// -- trading on signals (phase 3) -----------------------------------------------------------------------------
+const ACT_TEXT = {PLACED: "Placed", PROPOSED: "Waiting for you", ALERT: "Alert only", SKIPPED: "Skipped", FAILED: "Failed", EXPIRED: "Expired"};
+const MODE_HELP = {
+  off: "Off: signals are shown, nothing is traded.",
+  alert: "Alert: shows the trade each NEW signal would place, places nothing.",
+  approve: "Approve: each NEW signal waits for your Place / Skip here (expires).",
+  auto: "Auto: each NEW signal is placed at once, through the Strategy Builder's engine and checks.",
+};
+function ourTrade(s, trading) {
+  const a = trading && trading.actions[String(s.id)];
+  if (!a) return '<span class="hint small">–</span>';
+  const plan = a.plan ? `<span class="act-plan">${esc(a.plan.summary)}</span>` : "";
+  const why = a.reason ? `<span class="act-plan">${esc(a.reason)}</span>` : "";
+  const strat = a.strategy_id ? ` <a href="/" class="act-plan" title="Open the Strategy Builder">strategy #${a.strategy_id}</a>` : "";
+  const btns = a.status === "PROPOSED" ? `<span class="act-btns"><button type="button" class="place" data-approve="${s.id}">Place</button>
+    <button type="button" data-skip="${s.id}">Skip</button></span>` : "";
+  return `<span class="act ${a.status}">${ACT_TEXT[a.status] || a.status}</span>${strat}${plan}${why}${btns}`;
+}
+
+let RULES = null, editing = false;
+function renderTrading(trading) {
+  const panel = $("#trading-panel");
+  if (!trading) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  RULES = trading.rules;
+  document.querySelectorAll("#mode-seg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === RULES.mode));
+  $("#mode-help").textContent = MODE_HELP[RULES.mode] || "";
+  $("#rules-example").textContent = trading.example ? `Latest signal #${trading.example.signal} would place: ${trading.example.summary}` : "";
+  if (editing) return;                                       // don't overwrite what you are typing
+  const f = $("#rules-form");
+  for (const k of ["action", "strike_offset", "spread_width", "leg_sl_points", "max_loss", "max_profit", "order_type",
+    "start", "end", "max_trades_per_day", "max_signal_age_s", "approve_timeout_s"]) f[k].value = RULES[k] ?? "";
+  f.lots_NIFTY.value = RULES.lots.NIFTY ?? 1;
+  f.lots_SENSEX.value = RULES.lots.SENSEX ?? 1;
+  f.idx_NIFTY.checked = RULES.indices.includes("NIFTY");
+  f.idx_SENSEX.checked = RULES.indices.includes("SENSEX");
+  f.exit_on_channel_sl.checked = !!RULES.exit_on_channel_sl;
+}
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Trader": "1"}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+$("#rules-form").addEventListener("input", () => { editing = true; $("#rules-msg").textContent = "unsaved changes"; });
+$("#rules-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, n = (v) => (v === "" ? null : Number(v));
+  const body = {
+    action: f.action.value, strike_offset: n(f.strike_offset.value) ?? 0, spread_width: n(f.spread_width.value) ?? 1,
+    lots: {NIFTY: n(f.lots_NIFTY.value) ?? 1, SENSEX: n(f.lots_SENSEX.value) ?? 1}, leg_sl_points: n(f.leg_sl_points.value),
+    max_loss: n(f.max_loss.value), max_profit: n(f.max_profit.value), order_type: f.order_type.value,
+    start: f.start.value, end: f.end.value, max_trades_per_day: n(f.max_trades_per_day.value) ?? 0,
+    max_signal_age_s: n(f.max_signal_age_s.value) ?? 120, approve_timeout_s: n(f.approve_timeout_s.value) ?? 120,
+    indices: ["NIFTY", "SENSEX"].filter((i) => f[`idx_${i}`].checked), exit_on_channel_sl: f.exit_on_channel_sl.checked,
+  };
+  try { await post("/api/telegram/rules", body); editing = false; $("#rules-msg").textContent = "saved"; last = ""; refresh(); }
+  catch (err) { $("#rules-msg").textContent = `not saved: ${err.message}`; }
+});
+$("#mode-seg").addEventListener("click", async (e) => {
+  const m = e.target.dataset?.mode;
+  if (!m || !RULES || m === RULES.mode) return;
+  if (m === "auto" && !window.confirm("Auto: every NEW signal will be placed as a real trade on your account (in LIVE mode, real money). Turn Auto on?")) return;
+  try { await post("/api/telegram/rules", {mode: m}); last = ""; refresh(); }
+  catch (err) { $("#rules-msg").textContent = `not changed: ${err.message}`; }
+});
+$("#sig-body").addEventListener("click", async (e) => {
+  const ap = e.target.dataset?.approve, sk = e.target.dataset?.skip;
+  if (!ap && !sk) return;
+  e.stopPropagation();
+  e.target.disabled = true;
+  try { await post(ap ? "/api/telegram/approve" : "/api/telegram/skip", {signal_id: Number(ap || sk)}); }
+  catch (err) { window.alert(err.message); }
+  last = ""; refresh();
+}, true);

@@ -444,3 +444,9 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 /* a resting Add shown under its leg until it fills */
 .legs-live tr.add-row td { padding-top: 2px; padding-bottom: 6px; border-top: 0; }
 .legs-live tr.add-row td.sym { color: var(--muted); }
+.exit-type button.on { background: var(--accent); color: #fff; }
+
+/* exit pop-up: the limit price while Market is selected - dimmed, still clickable (clicking switches to Limit) */
+#exit-price.inactive { opacity: .45; border-style: dashed; cursor: pointer; }
+label.inactive > span { opacity: .55; }
+#exit-price:not(.inactive) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }

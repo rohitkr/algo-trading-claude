@@ -1089,7 +1089,7 @@ function contractName(t) {
 const EXIT_REASONS = {
   STOP_LOSS_HIT: "SL hit", TRAILING_SL_HIT: "Trailing SL hit", TARGET_HIT: "Target booked", USER_EXIT: "Exited by you",
   MANUAL_EXIT: "Closed in Kite", AUTO_EXIT: "Auto-exit time", SQUARE_OFF: "Square-off time", DAILY_LIMIT: "Daily loss limit",
-  STRATEGY_LOSS_LIMIT: "Max loss hit", STRATEGY_PROFIT_LOCKED: "Locked profit (combined SL)", STRATEGY_PROFIT_TARGET: "Max profit booked", STRATEGY_TRAIL_STOP: "Trailing profit stop",
+  LIMIT_EXIT: "Exited at your limit", STRATEGY_LOSS_LIMIT: "Max loss hit", STRATEGY_PROFIT_LOCKED: "Locked profit (combined SL)", STRATEGY_PROFIT_TARGET: "Max profit booked", STRATEGY_TRAIL_STOP: "Trailing profit stop",
 };
 function legStatus(t) {
   if (t.pending_exit_reason) return {text: `Exiting · ${EXIT_REASONS[t.pending_exit_reason] || t.pending_exit_reason}`, cls: "warn"};
@@ -1153,6 +1153,13 @@ function strategyCard(s) {
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}
       ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Buy or sell this contract again">Re-enter</button>` : ""}</td></tr>
+    ${t.limit_exit ? `<tr class="add-row"><td></td><td class="sym">↳ Exit at limit <small>(SL protects the rest meanwhile)</small></td>
+      <td class="num">${t.limit_exit.qty}</td><td></td><td class="num">${num(t.limit_exit.price)}</td><td></td><td></td><td></td><td></td>
+      <td><span class="leg-st ${t.limit_exit.filled ? "part" : "wait"}">${t.limit_exit.status === "PLACING" ? "Placing…"
+        : t.limit_exit.filled ? `Partly filled ${t.limit_exit.filled}/${t.limit_exit.qty}` : "Waiting for price"}</span></td>
+      <td class="leg-actions"><button type="button" class="edit-btn" data-le-price="${t.id}" title="Change the limit price">Edit</button>
+        <button type="button" class="mkt-btn" data-le-market="${t.id}" title="Exit these lots at the live price instead">Market</button>
+        <button type="button" class="leg-del" data-le-cancel="${t.id}" title="Cancel the limit exit (keep the position)">✕</button></td></tr>` : ""}
     ${adds.map((pa) => `<tr class="add-row"><td></td><td class="sym">↳ Add <small>(merges into this leg when filled)</small></td>
       <td class="num">${pa.qty}</td><td class="num">${num(pa.price)}</td><td></td><td></td><td></td><td></td><td></td>
       <td><span class="leg-st ${pa.filled ? "part" : "wait"}">${pa.filled ? `Partly filled ${pa.filled}/${pa.qty}` : "Waiting for fill"}</span></td>
@@ -1290,18 +1297,82 @@ async function editLeg(tid) {
   } catch (e) { alertBox("Edit failed", [e.message]); }
 }
 
+// Exit a leg: Market (fills now) or Limit (a resting order at your price, never chased; the SL keeps protecting
+// the position while it waits).
 async function exitLeg(tid) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
     const lots = Math.floor(t.open_qty / t.lot_size);
-    const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
-      <label>Lots to exit (of ${lots} open) <input id="exit-lots" type="number" min="1" max="${lots}" step="1" value="${lots}"></label>`;
-    const ok = await dialog("Exit this leg?", html, MODE === "LIVE");
-    if (!ok) return;
+    const tick = Number(t.tick_size) || 0.05;
+    const ltp = t.kite_ltp ?? t.last_ltp;
+    const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${contractName(t)}</div>
+      <div class="side-toggle exit-type" role="radiogroup" aria-label="Exit type">
+        <button type="button" data-xt="MARKET" class="on">Market</button><button type="button" data-xt="LIMIT">Limit</button></div>
+      <div class="edit-leg-grid">
+        <label>Lots to exit (of ${lots} open) <input id="exit-lots" type="number" min="1" max="${lots}" step="1" value="${lots}"></label>
+        <label><span>Limit price ₹ ${ltpBtn("#exit-price")}</span>
+          <input id="exit-price" type="number" step="any" min="0" value="${ltp != null ? toTick(Number(ltp), tick) : ""}"></label>
+      </div>
+      <p class="hint small" id="exit-hint">Market: exits now at the live price.</p>`;
+    const pending = dialog("Exit this leg?", html, MODE === "LIVE");
+    let xt = "MARKET";
+    const setType = (v) => {
+      xt = v;
+      $$(".exit-type button").forEach((b) => b.classList.toggle("on", b.dataset.xt === v));
+      // Market: the price box is dimmed but still clickable - clicking / typing in it means "exit at a limit"
+      $("#exit-price").classList.toggle("inactive", v !== "LIMIT");
+      $("#exit-price").closest("label").classList.toggle("inactive", v !== "LIMIT");
+      $("#exit-hint").textContent = v === "LIMIT"
+        ? `Limit: waits at your price (never chased). Your SL ${num(t.current_sl)} keeps protecting the position meanwhile.`
+        : "Market: exits now at the live price.";
+      okButton(v === "LIMIT" ? "Place limit exit" : "Exit now", t.side === "BUY" ? "SELL" : "BUY");
+    };
+    $$(".exit-type button").forEach((b) => { b.onclick = () => setType(b.dataset.xt); });
+    setType("MARKET");
+    wireLtpFill(t);
+    const toLimit = () => { if (xt !== "LIMIT") setType("LIMIT"); };
+    $("#exit-price").addEventListener("focus", toLimit);
+    $("#exit-price").addEventListener("input", toLimit);
+    $("#dlg-body .ltp-fill").addEventListener("click", toLimit);
+    if (!(await pending)) return;
     const chosen = Math.max(1, Math.min(lots, Math.floor(Number($("#exit-lots").value)) || lots));
-    await exitQty(t, chosen * t.lot_size);
+    if (xt === "LIMIT") {
+      const price = Number($("#exit-price").value);
+      if (!(price > 0)) return alertBox("Price needed", ["enter the limit price to exit at"]);
+      await api(`/api/trades/${tid}/limit_exit`, {qty: chosen * t.lot_size, price: toTick(price, tick)});
+    } else {
+      await exitQty(t, chosen * t.lot_size);
+    }
     refreshStrategies();
-  } catch (e) { alertBox("Error", [e.message]); }
+  } catch (e) { alertBox("Not exited", [e.message]); }
+}
+
+// The waiting limit exit of a leg: change its price, exit those lots at market instead, or cancel it.
+async function limitExitAction(tid, action) {
+  try {
+    const t = (await api(`/api/trades/${tid}`)).trade;
+    const le = t.limit_exit;
+    if (!le) return refreshStrategies();
+    if (action === "price") {
+      const pending = dialog("Edit the limit exit", `<div class="big-side ${esc(t.side)}">Exit ${le.qty} ${contractName(t)}</div>
+        <div class="edit-leg-grid"><label><span>Limit price ₹ ${ltpBtn("#le-price")}</span>
+          <input id="le-price" type="number" step="any" min="0" value="${le.price}"></label></div>`, MODE === "LIVE");
+      wireLtpFill(t);
+      okButton("Save");
+      if (!(await pending)) return;
+      await api(`/api/trades/${tid}/limit_exit`, {action: "price", price: Number($("#le-price").value)});
+    } else if (action === "market") {
+      const pending = dialog("Exit at market instead?", `<div class="big-side ${esc(t.side)}">Exit ${le.qty} ${contractName(t)} now</div>
+        <p class="hint small">The limit order is cancelled and these lots exit at the live price.</p>`, MODE === "LIVE");
+      okButton("Exit now", t.side === "BUY" ? "SELL" : "BUY");
+      if (!(await pending)) return;
+      await api(`/api/trades/${tid}/limit_exit`, {action: "cancel"});
+      await exitQty(t, le.qty);
+    } else {
+      await api(`/api/trades/${tid}/limit_exit`, {action: "cancel"});   // one click: it only withdraws an order
+    }
+    refreshStrategies();
+  } catch (e) { alertBox("Limit exit not changed", [e.message]); }
 }
 
 // Add lots to a running leg (into the SAME leg: one position at the average price, SL resized), or re-enter a
@@ -1535,6 +1606,9 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (rid) return addToLeg(Number(rid), true);
   const lid = ev.target.dataset.legExit;
   if (lid) return exitLeg(Number(lid));
+  for (const [k, a] of [["lePrice", "price"], ["leMarket", "market"], ["leCancel", "cancel"]]) {
+    if (ev.target.dataset[k]) return limitExitAction(Number(ev.target.dataset[k]), a);
+  }
   for (const [k, a] of [["addPrice", "price"], ["addMarket", "market"], ["addCancel", "cancel"]]) {
     if (ev.target.dataset[k]) return addOrder(Number(ev.target.dataset[k]), a, Number(ev.target.dataset.addId));
   }

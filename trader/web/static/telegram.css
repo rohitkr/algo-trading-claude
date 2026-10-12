@@ -30,3 +30,24 @@
 .mode-pill.listening { background: var(--buy); } .mode-pill.off, .mode-pill.error { background: var(--sell); } .mode-pill.connecting { background: var(--warn); }
 .hidden { display: none; }
 .tg-head label.inline-check { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+
+/* trading on signals */
+.tg-trading { margin: 12px 16px 0; }
+.mode-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.mode-seg button { border: 0; border-radius: 0; background: transparent; color: var(--muted); font-weight: 700; padding: 6px 16px; }
+.mode-seg button.on[data-mode="off"] { background: var(--card2); color: var(--fg); }
+.mode-seg button.on[data-mode="alert"] { background: var(--accent); color: #fff; }
+.mode-seg button.on[data-mode="approve"] { background: var(--warn); color: #fff; }
+.mode-seg button.on[data-mode="auto"] { background: var(--sell); color: #fff; }
+.rules-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 12px; align-items: end; }
+.rules-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.rules-grid label.inline-check { flex-direction: row; align-items: center; gap: 6px; color: var(--fg); }
+.rules-actions { display: flex; align-items: center; gap: 10px; }
+.rules-actions .primary { flex: 0 0 auto; padding: 8px 18px; }
+.act { font-size: 12px; font-weight: 700; }
+.act.PLACED { color: var(--buy); } .act.PROPOSED { color: var(--warn); } .act.ALERT { color: var(--accent); }
+.act.SKIPPED, .act.EXPIRED { color: var(--muted); } .act.FAILED { color: var(--sell); }
+.act-plan { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+.act-btns { display: inline-flex; gap: 6px; margin-top: 4px; }
+.act-btns button { padding: 3px 10px; font-size: 12px; }
+.act-btns .place { background: var(--buy); border-color: var(--buy); color: #fff; }

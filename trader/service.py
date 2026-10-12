@@ -435,6 +435,68 @@ class TradeService:
                                           self.clock() + timedelta(seconds=self.cfg.confirm_token_s), payload={"qty": qty})
             return {"token": token, "qty": qty, "open_qty": open_qty, "trade": self.trade_view(trade_id)}
 
+    def limit_exit(self, trade_id: int, qty: int, price: float) -> dict:
+        """Exit `qty` (whole lots, up to all of it) with a resting LIMIT order at `price` - it waits for that price
+        and is never re-priced. Placed on the next tick after a fresh broker snapshot: the SL order first shrinks
+        to what stays open (or is cancelled when exiting all), so SL + limit can never both fill. The software stop
+        keeps watching: if the SL price is hit while the limit waits, the limit is cancelled and the rest exits at
+        market as usual."""
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] not in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED):
+                raise ActionError(f"trade is {t['status']}: only a running position can be exited at a limit")
+            if t["pending_exit_reason"]:
+                raise ActionError(f"an exit is already in progress ({t['pending_exit_reason']})")
+            q = self._derive(t)
+            if any(o["kind"] == "PARTIAL" and is_working(o["status"]) for o in q["orders"]) or t["pending_partial_qty"] \
+                    or t.get("pending_limit_exit"):
+                raise ActionError("an exit order is already waiting on this leg: edit or cancel it first")
+            lot = t["lot_size"]
+            qty = int(qty or 0)
+            if qty <= 0 or qty % lot:
+                raise ActionError(f"quantity must be a whole number of lots ({lot} each)")
+            if qty > q["open"]:
+                raise ActionError(f"only {q['open']} is open")
+            if not price or price <= 0:
+                raise ActionError("a limit price is required")
+            price = round(round(price / t["tick_size"]) * t["tick_size"], 2)
+            self.repo.update_trade(trade_id, pending_limit_exit=json.dumps({"qty": qty, "price": price}))
+            self.audit(trade_id, "LIMIT_EXIT_REQUESTED", "INFO", {"qty": qty, "price": price})
+            self._resync = True
+            self._tick_locked()
+            return {"ok": True, "trade": self.trade_view(trade_id)}
+
+    def update_limit_exit(self, trade_id: int, action: str, price: float | None = None) -> dict:
+        """The waiting limit exit of a leg: change its price ("price") or cancel it ("cancel"; the SL order is
+        restored to the full open quantity on the next tick)."""
+        with self.lock:
+            t = self._get(trade_id)
+            if t.get("pending_limit_exit") and action == "cancel":
+                self.repo.update_trade(trade_id, pending_limit_exit=None)
+                self.audit(trade_id, "LIMIT_EXIT_CANCELLED", "INFO", {"before_placing": True})
+                return {"ok": True, "trade": self.trade_view(trade_id)}
+            ws = [o for o in self.repo.orders(trade_id, "PARTIAL") if is_working(o["status"]) and o["purpose"] == "LIMIT_EXIT"]
+            if not ws:
+                raise ActionError("no limit exit is waiting on this leg (it may have just filled)")
+            o = ws[-1]
+            if o["status"] in LOCAL_PENDING or not o["broker_order_id"]:
+                raise ActionError("the limit exit is still being confirmed with Zerodha: retry in a moment")
+            if action == "cancel":
+                self.placer.cancel(o, "user cancelled the limit exit")
+                self.audit(trade_id, "LIMIT_EXIT_CANCELLED", "INFO", {"order_id": o["broker_order_id"]})
+            elif action == "price":
+                if not price or price <= 0:
+                    raise ActionError("a limit price is required")
+                price = round(round(price / t["tick_size"]) * t["tick_size"], 2)
+                if not self.placer.modify(o, price=price):
+                    raise ActionError("Zerodha did not accept the change (it may have just filled): see the leg")
+                self.audit(trade_id, "LIMIT_EXIT_MODIFIED", "INFO", {"order_id": o["broker_order_id"], "price": price})
+            else:
+                raise ActionError("unknown action")
+            self._resync = True
+            self._tick_locked()
+            return {"ok": True, "trade": self.trade_view(trade_id)}
+
     def confirm_partial_exit(self, trade_id: int, token: str) -> dict:
         with self.lock:
             t = self._get(trade_id)
@@ -907,6 +969,8 @@ class TradeService:
                 self._partial(t, q, ltp, now)
         if t["pending_partial_qty"]:
             self._manual_partial(t, q, ltp, now)
+        if t.get("pending_limit_exit"):
+            self._limit_exit(t, q, now)
         self._reprice_working(t, q, ltp, now, kinds=("PARTIAL",))
         self._ensure_sl(t, q, ltp, now)
 
@@ -1064,7 +1128,11 @@ class TradeService:
         if not reason:
             # What closed the rest: an exit order (its purpose) or the SL order. A partial never closes it all.
             exits = [o for o in q["orders"] if o["kind"] == "EXIT" and o["filled_qty"]]
-            reason = exits[-1]["purpose"] if exits and exits[-1]["purpose"] else self._sl_reason(t)
+            limit = [o for o in q["orders"] if o["kind"] == "PARTIAL" and o["purpose"] == "LIMIT_EXIT" and o["filled_qty"]]
+            if limit and (not exits or limit[-1]["id"] > exits[-1]["id"]):
+                reason = "LIMIT_EXIT"                   # the last thing that closed it was your limit exit
+            else:
+                reason = exits[-1]["purpose"] if exits and exits[-1]["purpose"] else self._sl_reason(t)
         self._cancel_leftovers(t, q, "trade closed")
         self._transition(t, L.EXITED, "TRADE_EXITED", "INFO",
                          {"reason": reason, "exit_avg_price": q["exit_avg"], "realized_pnl": q["realized"]},
@@ -1081,6 +1149,8 @@ class TradeService:
     def _ensure_sl(self, t: dict, q: dict, ltp, now: datetime) -> None:
         partial_left = sum(o["quantity"] - o["filled_qty"] for o in q["orders"]
                            if o["kind"] == "PARTIAL" and is_working(o["status"]))
+        if t.get("pending_limit_exit"):                 # a limit exit about to be placed: its lots need no SL
+            partial_left += int(json.loads(t["pending_limit_exit"])["qty"])
         want = q["open"] - partial_left
         sls = [o for o in q["orders"] if o["kind"] == "SL"]
         working = [o for o in sls if is_working(o["status"])]
@@ -1219,10 +1289,40 @@ class TradeService:
             self.repo.update_trade(t["id"], pending_partial_qty=None)
             self._resync = True
 
+    def _limit_exit(self, t: dict, q: dict, now: datetime) -> None:
+        """Place the requested limit exit (limit_exit): SL first shrunk to what stays open, or cancelled (and seen
+        cancelled) when exiting everything; then one resting PARTIAL order at the user's price, never re-priced."""
+        req = json.loads(t["pending_limit_exit"])
+        qty, price = int(req["qty"]), float(req["price"])
+        if any(o["kind"] == "PARTIAL" and is_working(o["status"]) for o in q["orders"]):
+            return
+        if qty > q["open"]:
+            qty = q["open"]
+        if qty <= 0:
+            self.repo.update_trade(t["id"], pending_limit_exit=None)
+            return
+        sl = next((o for o in q["orders"] if o["kind"] == "SL" and is_working(o["status"])), None)
+        if sl is not None:
+            if sl["status"] in LOCAL_PENDING or sl["cancel_requested"]:
+                return                                  # wait: the cancel / placement must be confirmed first
+            if qty >= q["open"]:
+                self.placer.cancel(sl, "limit exit for the whole position")
+                self._resync = True
+                return                                  # placed once the SL is seen cancelled
+            if not self.placer.modify(sl, quantity=sl["filled_qty"] + q["open"] - qty):
+                return
+        row = self.placer.place(t, "PARTIAL", L.exit_side(t["side"]), qty, "LIMIT", price, purpose="LIMIT_EXIT")
+        if row is not None:
+            self.repo.update_trade(t["id"], pending_limit_exit=None)
+            self.audit(t["id"], "LIMIT_EXIT_PLACED", "INFO", {"qty": qty, "price": price})
+            self._resync = True
+
     def _reprice_working(self, t: dict, q: dict, ltp, now: datetime, kinds: tuple) -> None:
         for o in q["orders"]:
             if o["kind"] not in kinds or not is_working(o["status"]) or not o["broker_order_id"] or o["cancel_requested"]:
                 continue
+            if o["purpose"] == "LIMIT_EXIT":
+                continue                                # your price: never chased
             last = datetime.fromisoformat(o["last_priced_at"] or o["created_at"])
             if (now - last).total_seconds() < self.cfg.exit_reprice_s or ltp is None:
                 continue
@@ -1415,6 +1515,15 @@ class TradeService:
         v["reconcile_info"] = json.loads(t["reconcile_info"]) if t["reconcile_info"] else None
         if t["entry_time"] and t["exit_time"]:
             v["duration_s"] = (datetime.fromisoformat(t["exit_time"]) - datetime.fromisoformat(t["entry_time"])).total_seconds()
+        # a limit exit waiting (requested, or resting at Zerodha)
+        v["limit_exit"] = None
+        if t["status"] in L.OPEN_STATUSES:
+            le = [o for o in self.repo.orders(t["id"], "PARTIAL") if is_working(o["status"]) and o["purpose"] == "LIMIT_EXIT"]
+            if le:
+                v["limit_exit"] = {"qty": le[-1]["quantity"], "filled": le[-1]["filled_qty"], "price": le[-1]["price"],
+                                   "status": "WORKING"}
+            elif t.get("pending_limit_exit"):
+                v["limit_exit"] = {**json.loads(t["pending_limit_exit"]), "filled": 0, "status": "PLACING"}
         # Adds still resting at Zerodha (each shown as its own row until it fills and merges into the position)
         v["pending_adds"] = []
         if t["status"] in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED):
