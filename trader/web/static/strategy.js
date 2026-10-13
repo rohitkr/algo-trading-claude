@@ -59,6 +59,13 @@ const OT_HINT = {
   CNC: "Normal carry-forward (placed as NRML). No app-level overnight handling beyond your own settings.",
   BTST: "Carried overnight by THIS app: skips the global square-off and resumes monitoring (SL/TP/trailing) on the next run, until it hits its own exit condition.",
 };
+const SLM_HINT = {
+  ZERODHA: "An SL order rests at Zerodha: it protects the position even if this app or your Mac goes down.",
+  LOCAL: "No SL order at Zerodha: the algo watches the price (every ~1 s) and exits at market when the SL or target is hit. "
+    + "Not protected while this app is down. With no live price for 10 s it falls back to a Zerodha SL order.",
+};
+function updateSlModeHint() { $("#sl-mode-hint").textContent = SLM_HINT[$("input[name=sl_mode]:checked").value] || ""; }
+$$("input[name=sl_mode]").forEach((el) => el.addEventListener("change", updateSlModeHint));
 function updateOrderTypeHint() { $("#order-type-hint").textContent = OT_HINT[$("input[name=order_type]:checked").value] || ""; }
 $$("input[name=order_type]").forEach((el) => el.addEventListener("change", updateOrderTypeHint));
 updateOrderTypeHint();
@@ -86,6 +93,8 @@ updateSlCostState();
 async function loadMeta() {
   META = await api("/api/meta");
   MODE = META.mode;
+  $(`input[name=sl_mode][value="${META.sl_local_default ? "LOCAL" : "ZERODHA"}"]`).checked = true;
+  updateSlModeHint();
   const u = $("#base-underlying");
   u.innerHTML = Object.keys(META.underlyings).map((k) => `<option>${esc(k)}</option>`).join("");
   if (STORED?.underlying && META.underlyings[STORED.underlying]) u.value = STORED.underlying;
@@ -97,6 +106,7 @@ function restoreConfig() {
   const c = STORED?.config;
   if (!c) return;
   if (c.order_type) { const el = $(`input[name=order_type][value="${c.order_type}"]`); if (el) el.checked = true; }
+  if (c.sl_local != null) { $(`input[name=sl_mode][value="${c.sl_local ? "LOCAL" : "ZERODHA"}"]`).checked = true; updateSlModeHint(); }
   setTimeout(() => renderSettingsChip(), 0);              // the top-bar chip shows the restored order type
   if (c.start_time) $("#cfg-start-time").value = c.start_time;
   if (c.square_off_time) $("#cfg-square-off").value = c.square_off_time;
@@ -844,6 +854,7 @@ function collectConfig() {
   const mode = $("input[name=trailing_mode]:checked").value;
   const cfg = {
     order_type: $("input[name=order_type]:checked").value,
+    sl_local: $("input[name=sl_mode]:checked").value === "LOCAL",
     start_time: $("#cfg-start-time").value || null,
     square_off_time: $("#cfg-square-off").value || null,
     days: $$(".day.on").map((b) => b.dataset.day),
@@ -1196,7 +1207,7 @@ function strategyCard(s) {
     <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
     <td class="num">${t.exit_avg_price != null ? num(t.exit_avg_price) : "–"}</td>
     <td class="num" data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
-    <td class="num">${num(t.current_sl)}</td><td class="num">${num(t.target)}</td>
+    <td class="num">${num(t.current_sl)}${t.sl_local && t.status !== "EXITED" ? ` <small class="sl-tag" title="Watched by the algo: no SL order at Zerodha">local</small>` : ""}</td><td class="num">${num(t.target)}</td>
     <td class="num ${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
     <td title="${esc(t.status)}${t.exit_reason ? " · " + esc(t.exit_reason) : ""}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}"><span class="leg-st ${st.cls}">${st.text}</span></td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
@@ -1238,7 +1249,10 @@ function strategyCard(s) {
         ? `Combined SL <b class="${cfg.exit_sl_pnl >= 0 ? "pos" : "neg"}">${cfg.exit_sl_pnl >= 0 ? "+" : ""}${money(cfg.exit_sl_pnl)}${cfg.exit_sl_pnl >= 0 ? " locked" : ""}</b>`
         : `Max loss <b class="neg">${cfg.exit_loss_amount ? money(cfg.exit_loss_amount) : "off"}</b>`}</span>
       <span class="ex-chip">Max profit <b class="pos">${cfg.exit_profit_amount ? money(cfg.exit_profit_amount) : "off"}</b></span>
-      <button type="button" class="ex-edit" data-exits="${s.id}" title="Change the combined max loss / max profit">✎ Edit</button></div>` : ""}
+      <button type="button" class="ex-edit" data-exits="${s.id}" title="Change the combined max loss / max profit">✎ Edit</button>
+      <span class="ex-chip">SL at <b class="${cfg.sl_local ? "sl-local" : ""}">${cfg.sl_local ? "Local (algo)" : "Zerodha"}</b></span>
+      <button type="button" class="ex-edit" data-slmode="${s.id}" data-local="${cfg.sl_local ? "" : "1"}"
+        title="${cfg.sl_local ? "Put the SL orders back at Zerodha" : "Take the SL orders off Zerodha: the algo watches them"}">⇄ ${cfg.sl_local ? "Zerodha" : "Local"}</button></div>` : ""}
     ${failedHtml}
     <div class="leg-table-scroll">
     <table class="legs-live"><tr><th class="c-side">Side</th><th class="c-sym">Contract</th><th class="num c-qty">Qty</th><th class="num c-px">Entry</th>
@@ -1424,6 +1438,23 @@ async function exitLeg(tid) {
     }
     refreshStrategies();
   } catch (e) { alertBox("Not exited", [e.message]); }
+}
+
+// Move a strategy's stop-losses between Zerodha (a resting SL order) and local (watched by the algo).
+async function switchSlMode(sid, local) {
+  const html = local
+    ? `<p>The SL orders of this strategy's open legs are <b>cancelled at Zerodha</b>. The algo then watches each SL
+       and target itself (every ~1 s) and exits at market when one is hit.</p>
+       <p class="hint small">⚠ While this app is down (crash, Mac asleep, no internet) nothing protects these legs.
+       With no live price for 10 s a leg falls back to a Zerodha SL order by itself.</p>`
+    : `<p>An <b>SL order is placed at Zerodha</b> for every open leg at its current SL (if the price is already
+       through it, the leg exits now).</p>`;
+  const ok = await dialog(local ? "Move the SL to the algo (local)?" : "Put the SL orders at Zerodha?", html, MODE === "LIVE");
+  if (!ok) return;
+  try {
+    await api(`/api/strategies/${sid}/sl_mode`, {local});
+    refreshStrategies();
+  } catch (e) { alertBox("SL not switched", [e.message]); }
 }
 
 // The waiting limit exit of a leg: change its price, exit those lots at market instead, or cancel it.
@@ -1744,6 +1775,8 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (eid) return editLeg(Number(eid));
   const xid = ev.target.dataset.exits;
   if (xid) return editExits(Number(xid));
+  const smid = ev.target.dataset.slmode;
+  if (smid) return switchSlMode(Number(smid), ev.target.dataset.local === "1");
   const sid = ev.target.dataset.strategyLtp;
   if (sid) {
     const btn = ev.target;
@@ -1805,7 +1838,8 @@ setInterval(refreshStrategies, 30000);
   const chip = renderSettingsChip = () => {
     const ot = $("input[name=order_type]:checked")?.value || "";
     const sq = $("#cfg-square-off").value;
-    $("#settings-chip").textContent = [ot, sq && `sq-off ${sq}`].filter(Boolean).join(" · ");
+    const slLocal = $("input[name=sl_mode]:checked")?.value === "LOCAL";
+    $("#settings-chip").textContent = [ot, sq && `sq-off ${sq}`, slLocal && "SL local"].filter(Boolean).join(" · ");
   };
   drawer.addEventListener("change", chip);
   drawer.addEventListener("input", chip);

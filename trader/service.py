@@ -71,6 +71,7 @@ class TradeService:
         self.cfg, self.repo, self.broker, self.instruments, self.quotes = cfg, repo, broker, instruments, quotes
         self.clock, self.audit_log = clock, audit_log
         self.lock = threading.RLock()
+        self._local_blind: dict[int, datetime] = {}    # local-SL trade id -> since when it has had no price
         self.placer = OrderPlacer(repo, broker, self.audit, cfg.order_lookup_grace_s, clock)
         # Called at the end of every tick, under the same lock, after the per-trade engine has run - e.g.
         # StrategyService.tick for multi-leg combined-P&L rules. Optional; never required by TradeService.
@@ -137,7 +138,7 @@ class TradeService:
                          halted=self.halted(), group_id=group_id)
 
     def preview(self, payload: dict, group_id: int | None = None, leg_role: str | None = None,
-                sl_auto: bool = False) -> dict:
+                sl_auto: bool = False, sl_local: bool | None = None) -> dict:
         """Validate + risk-check a trade and store it (DRAFT -> READY). Places nothing. Returns a single-use
         confirm token when everything passes. group_id: the multi-leg strategy this leg belongs to (set by
         StrategyService only, never taken from the request body); the strategy counts as one position."""
@@ -176,6 +177,7 @@ class TradeService:
                 partial_qty=partial_qty, partial_price=req.partial_price if req.partial_enabled else None,
                 auto_exit_at=auto_exit_at.isoformat(timespec="seconds") if auto_exit_at else None,
                 group_id=group_id, leg_role=leg_role or None, sl_auto=int(bool(sl_auto)),
+                sl_local=int(self.cfg.sl_local_default if sl_local is None else bool(sl_local)),
                 status=L.DRAFT))
             self.audit(tid, "TRADE_CREATED", "INFO", {"request": payload, "tradingsymbol": inst.tradingsymbol,
                                                        "lot_size": inst.lot_size, "quantity": qty})
@@ -749,6 +751,29 @@ class TradeService:
         with self.lock:
             return self._tick_locked()
 
+    def local_watch(self) -> bool:
+        """A position whose stop-loss only the algo watches (local SL) is open: the monitor then ticks every
+        TRADER_LOCAL_SL_POLL_SECONDS, since nothing rests at Zerodha to catch the stop between ticks."""
+        return any(t.get("sl_local") and (t["filled_qty"] or 0) > 0 for t in self.repo.trades(L.OPEN_STATUSES))
+
+    def set_sl_local(self, trade_ids: list[int], local: bool) -> list[int]:
+        """Switch open legs between a Zerodha SL order and a local (algo) SL. The next tick does the rest:
+        local -> the resting SL order is cancelled; Zerodha -> one is placed at the current SL (unless the price
+        is already through it, then the stop exits at once)."""
+        changed = []
+        with self.lock:
+            for tid in trade_ids:
+                t = self.repo.trade(tid)
+                if not t or t["status"] not in L.OPEN_STATUSES or bool(t.get("sl_local")) == bool(local):
+                    continue
+                self.repo.update_trade(tid, sl_local=int(bool(local)))
+                self.audit(tid, "SL_MODE_CHANGED", "INFO", {"sl_mode": "LOCAL" if local else "ZERODHA",
+                                                             "sl": t["current_sl"]})
+                changed.append(tid)
+            if changed:
+                self._tick_locked()
+        return changed
+
     def exiting(self) -> bool:
         """An exit is in progress (waiting on an SL cancel, an exit order or its fill): the monitor then ticks
         every TRADER_FAST_POLL_SECONDS instead of TRADER_POLL_SECONDS, so the position is closed in ~1-2 s, not 6-9."""
@@ -1174,6 +1199,29 @@ class TradeService:
         want = q["open"] - partial_left
         sls = [o for o in q["orders"] if o["kind"] == "SL"]
         working = [o for o in sls if is_working(o["status"])]
+        if t.get("sl_local") and ltp is None and want > 0:
+            # A local stop can't be watched without a price. After TRADER_STOP_GRACE_SECONDS blind, fall back to
+            # an SL order at Zerodha for good (no flapping between the two); the trade stays on it.
+            since = self._local_blind.setdefault(t["id"], now)
+            if (now - since).total_seconds() >= self.cfg.stop_grace_s:
+                self.repo.update_trade(t["id"], sl_local=0)
+                t["sl_local"] = 0
+                self._local_blind.pop(t["id"], None)
+                self.audit(t["id"], "LOCAL_SL_NO_PRICE", "CRITICAL",
+                           {"blind_s": round((now - since).total_seconds(), 1), "sl": t["current_sl"],
+                            "action": "no live price: the stop-loss is now an SL order at Zerodha"})
+        elif t.get("sl_local"):
+            self._local_blind.pop(t["id"], None)
+        if t.get("sl_local"):
+            # Local SL: no stop order at Zerodha; the stop check in _manage exits at a marketable price when the
+            # LTP crosses current_sl. One left over from before a switch to local is taken off.
+            for w in working:
+                if w["broker_order_id"] and not w["cancel_requested"]:
+                    self.audit(t["id"], "SL_ORDER_TO_LOCAL", "INFO", {"order": w["broker_order_id"], "sl": t["current_sl"]})
+                    self.placer.cancel(w, "stop-loss moved to the algo (local SL)")
+                    self._resync = True
+            self._activate(t)
+            return
         if working:
             w = working[-1]
             if len(working) > 1:
@@ -1378,7 +1426,8 @@ class TradeService:
     def _price_age(self, t: dict, now: datetime) -> float:
         """How fresh the price must be for this trade. Fast only while a rule acts on it; a trade whose only
         rule is the SL resting at Zerodha is priced slowly (display + gap check), saving Breeze calls."""
-        fast = (t["pending_exit_reason"] or t["sl_software_only"] or t["stop_breached_at"] or t["target"] is not None
+        fast = (t["pending_exit_reason"] or t["sl_software_only"] or t.get("sl_local") or t["stop_breached_at"]
+                or t["target"] is not None
                 or t["trail_enabled"] or (t["partial_enabled"] and not t["partial_done"]))
         return self.cfg.quote_ttl_s if fast else self.cfg.quote_slow_s
 
@@ -1608,7 +1657,8 @@ class TradeService:
                 out[u] = {"exchange": exchange_for(u), "expiries": [e.isoformat() for e in exps], "lot_size": lot}
             except Exception as exc:
                 out[u] = {"exchange": exchange_for(u), "error": str(exc)}
-        return {"underlyings": out, "mode": self.cfg.mode, "default_product": self.cfg.product}
+        return {"underlyings": out, "mode": self.cfg.mode, "default_product": self.cfg.product,
+                "sl_local_default": self.cfg.sl_local_default}
 
     def spot(self, underlying: str, with_ltp: bool = False, force: bool = False) -> dict:
         """The underlying index's own LTP (display only, e.g. the "NIFTY 22810" banner) - a Breeze call only

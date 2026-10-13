@@ -38,6 +38,15 @@
     </div>
 
     <div class="field-group">
+      <label class="group-label">Stop-loss at</label>
+      <span class="seg" id="sl-mode-seg">
+        <input type="radio" name="sl_mode" value="ZERODHA" id="slm-zerodha" checked><label for="slm-zerodha">Zerodha</label>
+        <input type="radio" name="sl_mode" value="LOCAL" id="slm-local"><label for="slm-local">Local (algo)</label>
+      </span>
+      <p class="hint small" id="sl-mode-hint"></p>
+    </div>
+
+    <div class="field-group">
       <label class="group-label">Time settings (optional)</label>
       <div class="grid3">
         <label>Start time <input type="time" id="cfg-start-time" value="09:16"></label>

@@ -71,7 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     from .web.server import make_server
     port = args.port or cfg.port
     srv = make_server(app, port)
-    mon = Monitor(app.service, cfg.poll_seconds, after_tick=app.hub.after_tick, fast_s=cfg.fast_poll_seconds)
+    mon = Monitor(app.service, cfg.poll_seconds, after_tick=app.hub.after_tick, fast_s=cfg.fast_poll_seconds,
+                  local_s=cfg.local_sl_poll_seconds)
     app.hub.start()
     mon.start()
     if app.telegram is not None:

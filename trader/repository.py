@@ -187,7 +187,8 @@ CREATE TABLE IF NOT EXISTS system_status (key TEXT PRIMARY KEY, value TEXT, upda
 ADDED_COLUMNS = {"trades": [("user_sl", "REAL"), ("group_id", "INTEGER"), ("leg_role", "TEXT"),
                             ("kite_ltp", "REAL"), ("order_type", "TEXT"), ("pending_partial_qty", "INTEGER"),
                             ("sl_auto", "INTEGER"),
-                            ("pending_limit_exit", "TEXT")],   # JSON {"qty", "price"}: a limit exit to place next tick   # 1 = stop derived by the app (no SL chosen), follows entry edits
+                            ("pending_limit_exit", "TEXT"),
+                            ("sl_local", "INTEGER")],   # 1 = no SL order at Zerodha: the algo watches the stop itself   # JSON {"qty", "price"}: a limit exit to place next tick   # 1 = stop derived by the app (no SL chosen), follows entry edits
                  "action_tokens": [("payload", "TEXT")],
                  "strategies": [("pnl_base", "REAL")]}   # P&L booked before a re-entry: the strategy's own
                                                           # profit/loss/trail rules count only what comes after

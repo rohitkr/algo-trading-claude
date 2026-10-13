@@ -60,6 +60,12 @@ def _num(v) -> float | None:
     return float(v) if v not in (None, "") else None
 
 
+def _flag(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on", "local")
+    return bool(v)
+
+
 def _amount(v) -> float | None:
     """A combined max profit / max loss in rupees: blank, 0 or negative = off."""
     n = _num(v)
@@ -86,6 +92,9 @@ class GlobalConfig:
     trail_profit_by: float | None = None
     move_sl_to_cost_enabled: bool = False
     move_sl_to_cost_at: float | None = None       # points of favourable move (per leg) that triggers it
+    # Where each leg's stop-loss lives: False = an SL order at Zerodha, True = watched by the algo (local; exits at
+    # a marketable price when hit). None = the account default (TRADER_SL_MODE), fixed when the strategy is created.
+    sl_local: bool | None = None
 
     @classmethod
     def from_json(cls, d: dict) -> "GlobalConfig":
@@ -105,7 +114,8 @@ class GlobalConfig:
                    lock_profit_at=_num(d.get("lock_profit_at")), trail_every_increase=_num(d.get("trail_every_increase")),
                    trail_profit_by=_num(d.get("trail_profit_by")),
                    move_sl_to_cost_enabled=bool(d.get("move_sl_to_cost_enabled")),
-                   move_sl_to_cost_at=_num(d.get("move_sl_to_cost_at")))
+                   move_sl_to_cost_at=_num(d.get("move_sl_to_cost_at")),
+                   sl_local=None if d.get("sl_local") is None else _flag(d.get("sl_local")))
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -144,6 +154,8 @@ class StrategyService:
             except ValueError as exc:
                 return {"ok": False, "errors": [str(exc)]}
             now = self.svc.clock()
+            if cfg.sl_local is None:
+                cfg.sl_local = self.svc.cfg.sl_local_default
             if cfg.no_trade_after and now.time() >= cfg.no_trade_after:
                 return {"ok": False, "errors": [f"past this strategy's no-trade-after time ({cfg.no_trade_after:%H:%M})"]}
             legs_in = payload.get("legs") or []
@@ -179,7 +191,7 @@ class StrategyService:
                     continue
                 # preview only STORES the leg (grouped); nothing is placed yet
                 p = self.svc.preview(req, group_id=sid, leg_role=str(leg.get("leg_role") or "") or None,
-                                     sl_auto=bool(req.pop("sl_auto", False)))
+                                     sl_auto=bool(req.pop("sl_auto", False)), sl_local=req.pop("sl_local", None))
                 if not p["ok"]:
                     errors += [f"leg {i} ({tag}): {e}" for e in p["errors"]]
                     # a stop on the wrong side already explains itself: don't repeat it as "LTP through the stop"
@@ -264,7 +276,7 @@ class StrategyService:
             except (KeyError, ValueError) as exc:
                 return {"ok": False, "errors": [str(exc)]}
             p = self.svc.preview(req, group_id=s["id"], leg_role=t.get("leg_role"),
-                                 sl_auto=bool(req.pop("sl_auto", False)))
+                                 sl_auto=bool(req.pop("sl_auto", False)), sl_local=req.pop("sl_local", None))
             if not p["ok"]:
                 if p.get("trade_id"):
                     self.repo.update_trade(p["trade_id"], group_id=None)    # not placed: keep it off the card
@@ -342,7 +354,7 @@ class StrategyService:
                    option_type=leg.get("option_type"), side=side, lots=leg.get("lots") or 1,
                    entry_price=entry_price, stop_loss=stop_loss, target=target,
                    product=_product_for(cfg.order_type), order_type=cfg.order_type,
-                   auto_exit_time=auto_exit, price_type=price_type, sl_auto=sl_auto)
+                   auto_exit_time=auto_exit, price_type=price_type, sl_auto=sl_auto, sl_local=cfg.sl_local)
 
     # -- per-tick monitoring: combined P&L rules only, nothing per-leg is touched except as noted -------
     def tick(self, now: datetime) -> None:
@@ -481,6 +493,23 @@ class StrategyService:
             cfg.update(new)
             self.repo.update_strategy(strategy_id, config=json.dumps(GlobalConfig.from_json(cfg).to_json()))
             self.svc.audit(None, "STRATEGY_EXITS_CHANGED", "INFO", {"strategy_id": strategy_id, "from": old, "to": new})
+            return {"ok": True, "strategy": self.view(strategy_id)}
+
+    def set_sl_mode(self, strategy_id: int, local: bool) -> dict:
+        """Move a strategy's stop-losses between Zerodha (an SL order rests there) and local (the algo watches
+        them): saved for its future legs / re-entries, and applied to every open leg from the next tick."""
+        with self.svc.lock:
+            s = self.repo.strategy(strategy_id)
+            if s is None:
+                raise ActionError(f"no strategy {strategy_id}")
+            cfg = json.loads(s["config"])
+            cfg["sl_local"] = bool(local)
+            self.repo.update_strategy(strategy_id, config=json.dumps(GlobalConfig.from_json(cfg).to_json()))
+            open_ids = [t["id"] for t in self.repo.trades_by_group(strategy_id) if t["status"] in L.OPEN_STATUSES]
+            changed = self.svc.set_sl_local(open_ids, bool(local))
+            self.svc.audit(None, "STRATEGY_SL_MODE", "INFO", {"strategy_id": strategy_id,
+                                                              "sl_mode": "LOCAL" if local else "ZERODHA",
+                                                              "legs": changed})
             return {"ok": True, "strategy": self.view(strategy_id)}
 
     # -- manual exit-all (user pressed "Exit strategy") --------------------------------------------

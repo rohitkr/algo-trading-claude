@@ -1,5 +1,6 @@
 """Background monitor: calls TradeService.tick() (then an optional after_tick hook) every TRADER_POLL_SECONDS, and
-every fast_s seconds while an exit is in progress (so a triggered exit isn't left waiting for the slow cadence)."""
+every fast_s seconds while an exit is in progress (so a triggered exit isn't left waiting for the slow cadence), and
+every local_s seconds while a leg with a local (algo-watched) stop-loss is open."""
 from __future__ import annotations
 
 import logging
@@ -9,10 +10,11 @@ log = logging.getLogger("trader.monitor")
 
 
 class Monitor(threading.Thread):
-    def __init__(self, service, interval_s: float, after_tick=None, fast_s: float | None = None):
+    def __init__(self, service, interval_s: float, after_tick=None, fast_s: float | None = None,
+                 local_s: float | None = None):
         super().__init__(name="trader-monitor", daemon=True)
         self.service, self.interval_s, self.after_tick = service, interval_s, after_tick
-        self.fast_s = fast_s
+        self.fast_s, self.local_s = fast_s, local_s
         self.stop_event = threading.Event()
 
     def run(self) -> None:
@@ -33,6 +35,12 @@ class Monitor(threading.Thread):
                         wait = self.fast_s
                 except Exception:
                     log.exception("exit check failed")
+            if self.local_s and self.local_s < wait:
+                try:
+                    if self.service.local_watch():
+                        wait = self.local_s
+                except Exception:
+                    log.exception("local SL check failed")
             self.stop_event.wait(wait)
 
     def stop(self) -> None:

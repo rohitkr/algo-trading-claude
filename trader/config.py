@@ -99,6 +99,14 @@ def load_env(env_file: str | Path | None = ".env", environ: dict | None = None) 
     return env
 
 
+
+def _sl_mode(v: str) -> bool:
+    """TRADER_SL_MODE: ZERODHA (default, an SL order rests at Zerodha) or LOCAL (the algo watches it). True = LOCAL."""
+    m = str(v or "ZERODHA").strip().strip("'\"").upper()
+    if m not in ("ZERODHA", "LOCAL"):
+        raise ValueError(f"TRADER_SL_MODE must be ZERODHA or LOCAL, not {v!r}")
+    return m == "LOCAL"
+
 @dataclass(frozen=True)
 class TraderConfig:
     mode: str = "PAPER"
@@ -149,6 +157,8 @@ class TraderConfig:
         return self.max_loss_per_trade or 10_000.0
     require_ltp_for_entry: bool = True
     fast_poll_seconds: float = 0.7           # TRADER_FAST_POLL_SECONDS: tick cadence while an exit is in progress
+    sl_local_default: bool = False           # TRADER_SL_MODE=LOCAL: new strategies keep their SL in the algo, not Zerodha
+    local_sl_poll_seconds: float = 1.0       # TRADER_LOCAL_SL_POLL_SECONDS: tick cadence while a local-SL leg is open
     allow_add_to_symbol: bool = True
     hostnames: tuple = ("algo.local",)     # TRADER_HOSTNAMES: extra names the web UI answers to (with /etc/hosts)       # TRADER_ALLOW_ADD_TO_SYMBOL: a 2nd trade (same side) in a held symbol
     freeze_qty: dict = field(default_factory=lambda: dict(DEFAULT_FREEZE))
@@ -238,6 +248,8 @@ class TraderConfig:
             require_ltp_for_entry=_bool(g("TRADER_REQUIRE_LTP_FOR_ENTRY", "true")),
             allow_add_to_symbol=_bool(g("TRADER_ALLOW_ADD_TO_SYMBOL", "true")),
             fast_poll_seconds=float(g("TRADER_FAST_POLL_SECONDS", d.fast_poll_seconds)),
+            sl_local_default=_sl_mode(g("TRADER_SL_MODE", "ZERODHA")),
+            local_sl_poll_seconds=float(g("TRADER_LOCAL_SL_POLL_SECONDS", d.local_sl_poll_seconds)),
             hostnames=tuple(h.strip().lower() for h in g("TRADER_HOSTNAMES", ",".join(d.hostnames)).split(",")
                             if h.strip()),
             freeze_qty=freeze,
