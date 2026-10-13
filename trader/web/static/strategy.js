@@ -898,6 +898,34 @@ function wireLtpFill(t) {
     };
   });
 }
+// A live "LTP ₹x" line in a leg's pop-up: refreshed every 2 s while the pop-up is open; clicking it puts the price in
+// the box `target`.
+const liveLtpLine = (target) => `<button type="button" class="live-ltp" data-ltp-into="${target}"
+  title="Live price: click to use it">LTP <b>–</b></button>`;
+function wireLiveLtp(t) {
+  const el = $("#dlg-body .live-ltp");
+  if (!el) return;
+  const d = $("#dlg"), tick = Number(t.tick_size) || 0.05;
+  let ltp = t.kite_ltp ?? t.last_ltp;
+  const show = () => { el.querySelector("b").textContent = ltp != null ? `₹${num(ltp)}` : "–"; };
+  const fetchLtp = async () => {
+    if (!d.open || !el.isConnected) return clearInterval(timer);
+    try {
+      const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(t.underlying)}&expiry=${t.expiry}&strike=${t.strike}&option_type=${t.option_type}`);
+      if (c.ltp != null && el.isConnected) { ltp = c.ltp; show(); }
+    } catch (e) { /* keep the last one shown */ }
+  };
+  const timer = setInterval(fetchLtp, 2000);
+  show(); fetchLtp();
+  el.onclick = (ev) => {
+    ev.preventDefault();
+    if (ltp == null) return;
+    const box = $(el.dataset.ltpInto);
+    box.value = toTick(Number(ltp), tick);
+    box.dispatchEvent(new Event("input", {bubbles: true}));
+    box.focus();
+  };
+}
 function alertBox(title, lines) { dialog(title, `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`); $("#dlg-ok").classList.add("hidden"); }
 
 // ---------------------------------------------------------------- trade all
@@ -919,6 +947,7 @@ function confirmOrders(active) {
       <div class="order-all">All legs: <button type="button" data-all="LIMIT" class="${all === "LIMIT" ? "on" : ""}">Limit</button>
         <button type="button" data-all="MARKET" class="${all === "MARKET" ? "on" : ""}">Market</button></div>
       <table class="order-confirm"><tr><th></th><th>#</th><th>Side</th><th>Contract</th><th>Lots</th><th>Type</th>
+        <th class="num">LTP</th>
         <th>Price <button type="button" class="spin-btn" data-reset-ltp title="Reset LTP for every leg">↻</button></th><th>Order</th></tr>
       ${rows.map((r, i) => `<tr data-row="${i}">
         <td class="drag-handle" data-drag="${i}" title="Drag to re-arrange" aria-label="Drag to re-arrange">⠿</td>
@@ -929,6 +958,7 @@ function confirmOrders(active) {
         <td>${esc(r.leg.underlying)} ${r.leg.strike}</td><td>${r.leg.lots}</td>
         <td><select data-type="${i}"><option value="LIMIT"${r.type === "LIMIT" ? " selected" : ""}>Limit</option>
           <option value="MARKET"${r.type === "MARKET" ? " selected" : ""}>Market</option></select></td>
+        <td class="num ltp-cell" data-ltp-row="${i}" title="Live price: click to use it as the limit">${r.ltp != null ? num(r.ltp) : "–"}</td>
         <td>${r.type === "LIMIT" ? `<input type="number" step="any" min="0" data-price="${i}" value="${r.price ?? ""}" required>`
           : `<input type="text" value="" placeholder="at market" disabled aria-label="Market price">`}</td>
         <td><button type="button" data-up="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
@@ -936,8 +966,28 @@ function confirmOrders(active) {
       </tr>`).join("")}</table>
 `;
   };
+  const fetchLtps = () => Promise.all(rows.map(async (r, i) => {
+    try {
+      const c = await api(`/api/contract?ltp=1&underlying=${encodeURIComponent(r.leg.underlying)}&expiry=${r.leg.expiry}&strike=${r.leg.strike}&option_type=${r.leg.option_type}`);
+      if (c.ltp == null) return;
+      r.ltp = c.ltp; r.tick = Number(c.tick_size) || 0.05;
+      const cell = document.querySelector(`#dlg-body [data-ltp-row="${i}"]`);
+      if (cell) cell.textContent = num(c.ltp);
+    } catch (err) { /* keep the last one shown */ }
+  }));
   return new Promise((resolve) => {
     const body = $("#dlg-body");
+    fetchLtps();
+    const ltpTimer = setInterval(fetchLtps, 2000);
+    const useLtp = (e) => {                               // click an LTP: use it as that leg's limit price
+      const cell = e.target.closest?.("[data-ltp-row]");
+      if (!cell) return;
+      const r = rows[Number(cell.dataset.ltpRow)];
+      if (r.ltp == null) return;
+      r.type = "LIMIT"; r.price = toTick(Number(r.ltp), r.tick || 0.05);
+      draw();
+    };
+    body.addEventListener("click", useLtp);
     body.onclick = (e) => {
       const b = e.target.closest("button");
       if (!b) return;
@@ -980,6 +1030,8 @@ function confirmOrders(active) {
       draw();
     };
     d.onclose = () => {
+      clearInterval(ltpTimer);
+      body.removeEventListener("click", useLtp);
       body.onclick = body.onchange = body.oninput = null;
       ORDER_MOVE = null;
       if (d.returnValue !== "ok") return resolve(null);
@@ -1136,7 +1188,7 @@ function strategyCard(s) {
     // Both place a NEW leg in this strategy (its own SL/target).
     const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0;
     const adds = t.pending_adds || [];       // Adds still resting: each its own row below, merged when it fills
-    const qtyText = adds.length ? `${t.open_qty}` :
+    const qtyText = adds.length ? `${t.base_qty ?? t.open_qty}` :
       (t.filled_qty || 0) > 0 && t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
     const st = legStatus(t);
     return `<tr><td><span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
@@ -1148,6 +1200,7 @@ function strategyCard(s) {
     <td class="num ${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
     <td title="${esc(t.status)}${t.exit_reason ? " · " + esc(t.exit_reason) : ""}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}"><span class="leg-st ${st.cls}">${st.text}</span></td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
+      ${canCancel ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Another order at a different price (merges into this leg when filled)">Add</button>` : ""}
       ${canCancel ? `<button type="button" class="mkt-btn" data-leg-market="${t.id}" title="Fill now: move the limit to the live price">Market</button>` : ""}
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
@@ -1263,16 +1316,39 @@ async function editLeg(tid) {
         <select id="edit-tp-type" data-prev="${tpMode}">${typeOpts("tp", tpMode)}</select>
       </span></label>
     </div>`;
-    const pending = dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html);
+    const pending = dialog(`Edit leg: ${t.side} ${t.tradingsymbol}`, html + `<div id="edit-pnl" class="edit-pnl" aria-live="polite"></div>`);
     wireLtpFill(t);
+    // What the position makes if the SL / the target is hit, recomputed as you type (incl. lots / entry while the
+    // entry hasn't filled yet). Same SL/TP -> price conversion as the save below.
+    const showPnl = () => {
+      const f = $("#leg-edit-form");
+      const entry = entryOpen && f.entry_price?.value ? Number(f.entry_price.value) : Number(ref);
+      const qty = entryOpen && f.lots?.value ? Number(f.lots.value) * t.lot_size : (t.open_qty || t.quantity);
+      const dir = t.side === "BUY" ? 1 : -1;
+      const at = (kind) => {
+        const v = $(`#edit-${kind}-value`).value;
+        const px = v === "" ? null : slTpValueToPrice(entry, t.side, kind, v, $(`#edit-${kind}-type`).value);
+        if (px == null || !(entry > 0)) return null;
+        return {px: toTick(px, tick), pnl: dir * (toTick(px, tick) - entry) * qty};
+      };
+      const sl = at("sl"), tp = at("tp");
+      const cell = (label, r, cls) => `<div><span>${label}</span><b class="${r ? (r.pnl >= 0 ? "pos" : "neg") : ""}">${
+        r ? `${r.pnl >= 0 ? "+" : ""}${money(Math.round(r.pnl))}` : "–"}</b><small>${r ? `at ${num(r.px)} · ${qty} qty` : cls}</small></div>`;
+      $("#edit-pnl").innerHTML = cell("If SL hits", sl, "no SL") + cell("If target hits", tp, "no target") +
+        (sl && tp && sl.pnl < 0 ? `<div><span>Reward / risk</span><b>${(tp.pnl / -sl.pnl).toFixed(2)}</b><small>target ÷ SL</small></div>` : "");
+    };
     for (const kind of ["sl", "tp"]) {
       const sel = $(`#edit-${kind}-type`), box = $(`#edit-${kind}-value`);
       sel.onchange = () => {
         box.value = convertSlTp(ref, t.side, kind, box.value, sel.dataset.prev, sel.value, tick);
         sel.dataset.prev = sel.value;
         rememberMode(kind, sel.value);
+        showPnl();
       };
+      box.addEventListener("input", showPnl);
     }
+    $("#leg-edit-form").addEventListener("input", showPnl);
+    showPnl();
     const go = await pending;
     if (!go) return;
     const changes = {};
@@ -1306,6 +1382,7 @@ async function exitLeg(tid) {
     const tick = Number(t.tick_size) || 0.05;
     const ltp = t.kite_ltp ?? t.last_ltp;
     const html = `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${contractName(t)}</div>
+      ${liveLtpLine("#exit-price")}
       <div class="side-toggle exit-type" role="radiogroup" aria-label="Exit type">
         <button type="button" data-xt="MARKET" class="on">Market</button><button type="button" data-xt="LIMIT">Limit</button></div>
       <div class="edit-leg-grid">
@@ -1330,10 +1407,12 @@ async function exitLeg(tid) {
     $$(".exit-type button").forEach((b) => { b.onclick = () => setType(b.dataset.xt); });
     setType("MARKET");
     wireLtpFill(t);
+    wireLiveLtp(t);
     const toLimit = () => { if (xt !== "LIMIT") setType("LIMIT"); };
     $("#exit-price").addEventListener("focus", toLimit);
     $("#exit-price").addEventListener("input", toLimit);
     $("#dlg-body .ltp-fill").addEventListener("click", toLimit);
+    $("#dlg-body .live-ltp").addEventListener("click", toLimit);
     if (!(await pending)) return;
     const chosen = Math.max(1, Math.min(lots, Math.floor(Number($("#exit-lots").value)) || lots));
     if (xt === "LIMIT") {
@@ -1355,9 +1434,11 @@ async function limitExitAction(tid, action) {
     if (!le) return refreshStrategies();
     if (action === "price") {
       const pending = dialog("Edit the limit exit", `<div class="big-side ${esc(t.side)}">Exit ${le.qty} ${contractName(t)}</div>
+        ${liveLtpLine("#le-price")}
         <div class="edit-leg-grid"><label><span>Limit price ₹ ${ltpBtn("#le-price")}</span>
           <input id="le-price" type="number" step="any" min="0" value="${le.price}"></label></div>`, MODE === "LIVE");
       wireLtpFill(t);
+      wireLiveLtp(t);
       okButton("Save");
       if (!(await pending)) return;
       await api(`/api/trades/${tid}/limit_exit`, {action: "price", price: Number($("#le-price").value)});
@@ -1393,7 +1474,7 @@ async function addToLeg(tid, reenter) {
     const html = `${toggle}<div class="big-side ${esc(t.side)}" id="add-head">${esc(t.side)} ${esc(t.tradingsymbol)}</div>
       <p class="hint small">LTP <b data-trade-ltp="${t.id}">${num(ltp)}</b> · lot size ${t.lot_size}${reenter
         ? ". Placed as a new leg of this strategy with its own SL / target."
-        : ` · holding ${Math.floor(t.open_qty / t.lot_size)} lot(s) @ ${num(ref)}. Added to this leg: quantity and average price
+        : ` · ${t.filled_qty > 0 ? `holding ${Math.floor(t.open_qty / t.lot_size)} lot(s) @ ${num(ref)}` : `waiting: ${Math.round((t.base_qty ?? t.quantity) / t.lot_size)} lot(s) @ ${num(t.entry_price)}`}. Added to this leg: quantity and average price
            update, and SL ${num(t.current_sl)} / target ${t.target != null ? num(t.target) : "none"} cover all of it (change with Edit).`}</p>
       <div class="edit-leg-grid">
         <label>Lots <input id="add-lots" type="number" min="1" step="1" value="${reenter ? t.lots : 1}"></label>
@@ -1531,12 +1612,22 @@ async function cancelLeg(tid) {
 }
 
 // Zerodha / Breeze lights in the header: green = working, red = a problem (the reason on hover), grey = not used.
-let LAST_DASH = null;
+let LAST_DASH = null, BROKER_DOWN = null;
+// Zerodha not reachable: no order can go in, so Trade all is disabled and the reason is shown above it
+function renderBrokerGate() {
+  const btn = $("#trade-all"), msg = $("#broker-down");
+  btn.disabled = !!BROKER_DOWN;
+  btn.title = BROKER_DOWN ? "Zerodha is not connected: orders can't be placed" : "";
+  msg.classList.toggle("hidden", !BROKER_DOWN);
+  if (BROKER_DOWN) msg.innerHTML = `<b>⚠ Zerodha is not connected</b> - orders can't be placed right now.
+    <span class="hint small">${esc(String(BROKER_DOWN).replace(/[.\s]+$/, ""))}. If your daily Zerodha login expired, log in again (./login.sh) and restart the trader (./start.sh).</span>`;
+}
 function renderConnections(d) {
   LAST_DASH = d;
   const set = (id, state, tip) => { const el = $(id); el.className = `conn ${state}`; el.title = tip; };
   const ageS = (iso) => (iso && d.now ? (new Date(d.now) - new Date(iso)) / 1000 : null);
   const b = d.system?.broker?.value || {};
+  BROKER_DOWN = null;
   if (d.broker === "paper") set("#conn-zerodha", "off", "Zerodha: not used (PAPER mode: simulated exchange)");
   else {
     const age = ageS(b.last_sync);
@@ -1544,6 +1635,7 @@ function renderConnections(d) {
     const stream = d.quotes?.source === "kite" ? ` · Kite price feed ${d.quotes.ok ? "live" : "NOT live" + (d.quotes.session_expired ? " (login expired)" : "")}` : "";
     set("#conn-zerodha", ok ? "on" : "bad", ok ? `Zerodha connected · last sync ${b.last_sync.slice(11)}${stream}`
       : `Zerodha: ${b.last_error || (age == null ? "no sync yet" : `no sync for ${Math.round(age)}s`)}${stream}`);
+    if (!ok) BROKER_DOWN = b.last_error || (age == null ? "no connection yet" : `no response from Zerodha for ${Math.round(age)} s`);
   }
   // Breeze: green = logged in today (and, if it serves prices, working); red = not logged in today, or failing
   const q = d.quotes || {};
@@ -1554,6 +1646,7 @@ function renderConnections(d) {
   else if (login.logged_in_today) set("#conn-breeze", "on", `Breeze logged in today · ${role}` +
     (br && br.api_budget_remaining != null ? ` · ${br.api_budget_remaining} calls left` : ""));
   else set("#conn-breeze", "bad", `Breeze: ${login.detail || "not logged in today"} · ${role}`);
+  renderBrokerGate();
 }
 
 // Running strategies are always listed first; finished ones are history, filtered by date and paged.
@@ -1601,7 +1694,11 @@ function renderStrategies() {
 
 async function refreshStrategies() {
   let d;
-  try { d = await api("/api/dashboard"); } catch (e) { $("#banner").textContent = "offline"; $("#banner").title = "Server unreachable: " + e.message; return; }
+  try { d = await api("/api/dashboard"); } catch (e) {
+    $("#banner").textContent = "offline"; $("#banner").title = "Server unreachable: " + e.message;
+    BROKER_DOWN = `the trader app is not reachable (${e.message})`; renderBrokerGate();
+    return;
+  }
   renderConnections(d);
   const b = $("#banner");                                  // small LIVE / PAPER pill next to the title
   b.className = "mode-pill" + (d.live ? " live" : "");

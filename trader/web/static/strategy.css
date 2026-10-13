@@ -295,9 +295,9 @@ td.num[data-trade-pnl], td.num[data-trade-pnlpct] { min-width: 12ch; }
 .hidden { display: none !important; }
 /* strategy legs: fixed layout, so column widths never depend on the (ticking) contents */
 .strategy-card table.legs-live { table-layout: fixed; width: 100%; min-width: 880px; }
-.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 17%; } .legs-live .c-qty { width: 7%; }
-.legs-live .c-px { width: 6.5%; } .legs-live .c-pnl { width: 8%; } .legs-live .c-status { width: 12%; }
-.legs-live .c-act { width: 18.5%; }   /* Edit + Add + Exit fit without scrolling */
+.legs-live .c-side { width: 5%; } .legs-live .c-sym { width: 15%; } .legs-live .c-qty { width: 7%; }
+.legs-live .c-px { width: 6.5%; } .legs-live .c-pnl { width: 8%; } .legs-live .c-status { width: 11%; }
+.legs-live .c-act { width: 21.5%; }   /* Edit + Add + Market + ✕ (waiting leg) fit without scrolling */
 .legs-live td.leg-actions button { padding-left: 10px; padding-right: 10px; }
 /* one line per leg whatever its state: buttons and status never wrap (full status on hover) */
 .legs-live td.leg-actions { white-space: nowrap; }
@@ -471,3 +471,45 @@ body.header-stuck { padding-top: var(--hdr-h, 64px); }
    bars": thin and invisible at rest; .is-scrolling (set for ~1 s by the page script on each scroll) shows them. */
 html, body, * { scrollbar-width: thin; scrollbar-color: transparent transparent; }
 html.is-scrolling, .is-scrolling { scrollbar-color: rgba(127, 127, 127, .55) transparent; }
+
+/* Zerodha not connected: shown above the disabled Trade all */
+.broker-down { padding: 8px 10px; border: 1px solid var(--sell); border-radius: 8px; background: rgba(239, 68, 68, .1);
+  color: var(--sell); font-size: 12.5px; line-height: 1.4; }
+.broker-down .hint { display: block; color: var(--fg); opacity: .8; margin-top: 2px; }
+#trade-all:disabled { opacity: .45; cursor: not-allowed; }
+
+/* edit leg: expected P&L if the SL / the target is hit (live as you type) */
+.edit-pnl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.edit-pnl > div { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.edit-pnl span { display: block; font-size: 11px; color: var(--muted); }
+.edit-pnl b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; margin: 2px 0; }
+.edit-pnl small { font-size: 11px; color: var(--muted); }
+
+/* place-order pop-up: live LTP per leg (click it to use it as the limit) */
+.order-confirm .ltp-cell { font-variant-numeric: tabular-nums; color: var(--accent); cursor: pointer; min-width: 64px; }
+.order-confirm .ltp-cell:hover { text-decoration: underline; }
+/* order pop-up: room for the LTP column, every cell on one line */
+dialog:has(table.order-confirm) { max-width: 740px; }
+table.order-confirm td, table.order-confirm th { white-space: nowrap; }
+/* order pop-up table: same clean look as the builder's leg table - header bar, roomy cells, row dividers */
+table.order-confirm { width: 100%; border-collapse: collapse; margin-top: 4px; }
+table.order-confirm th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  text-align: left; padding: 8px 10px; background: var(--card2); border-bottom: 1px solid var(--line); }
+table.order-confirm td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.order-confirm tr:last-child td { border-bottom: none; }
+table.order-confirm th:first-child, table.order-confirm td.drag-handle { padding: 0 2px 0 8px; width: 1%; }
+table.order-confirm td:nth-child(2) { color: var(--muted); width: 1%; }
+table.order-confirm td:nth-child(3) { white-space: nowrap; }
+table.order-confirm td:nth-child(3) .bs-btn.tag { margin-left: 6px; }
+table.order-confirm td:nth-child(4) { font-weight: 600; }
+table.order-confirm th:nth-child(5), table.order-confirm td:nth-child(5) { text-align: center; }
+table.order-confirm td.num.ltp-cell { min-width: 0; padding-right: 14px; }
+table.order-confirm th .spin-btn { padding: 0 6px; height: 20px; font-size: 12px; vertical-align: middle; }
+table.order-confirm td:last-child { white-space: nowrap; }
+table.order-confirm td:last-child button + button { margin-left: 4px; }
+@media (max-width: 800px) { table.order-confirm th, table.order-confirm td { padding-left: 6px; padding-right: 6px; } }
+/* live LTP line under the contract in a leg's pop-up (click = use it as the price) */
+.live-ltp { display: block; width: fit-content; margin: 4px 0 10px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--card2); color: var(--muted); font-size: 13px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.live-ltp b { color: var(--accent); font-weight: 700; margin-left: 2px; }
+.live-ltp:hover { border-color: var(--accent); }

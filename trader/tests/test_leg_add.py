@@ -230,3 +230,71 @@ def test_resting_add_lots_can_be_changed(tmp_path):
     r.ex.auto_match = True
     r.svc.update_add(tid, "market", add_id=add["id"])
     assert r.svc.trade_view(tid)["open_qty"] == 325
+
+
+def waiting_leg(tmp_path):
+    """BUY 2 lots @ 100 resting (LTP 105, nothing filled), as a strategy leg."""
+    r = Rig(tmp_path)
+    r.price(105)
+    strat = StrategyService(r.svc, r.repo)
+    r.svc.extra_tick = strat.tick
+    res = strat.create_and_trade({"config": {"order_type": "MIS"}, "legs": [dict(
+        underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE", side="BUY", lots=2,
+        entry_price=100, sl_value=30, sl_type="POINTS")]})
+    tid = res["confirmed"][0]
+    r.tick()
+    assert r.trade(tid)["status"] == L.ENTRY_PENDING
+    return r, strat, tid
+
+
+def test_ladder_of_buys_on_a_waiting_leg(tmp_path):
+    # 2026-10-12: "2 lots at 100, 2 at 90, 2 at 80" before anything fills
+    r, strat, tid = waiting_leg(tmp_path)
+    assert strat.add_to_leg(tid, {"lots": 2, "price_type": "LIMIT", "entry_price": 90})["ok"]
+    assert strat.add_to_leg(tid, {"lots": 2, "price_type": "LIMIT", "entry_price": 80})["ok"]
+    r.tick()
+    v = r.svc.trade_view(tid)
+    assert v["status"] == L.ENTRY_PENDING and [a["price"] for a in v["pending_adds"]] == [90, 80]
+    assert (v["quantity"], v["base_qty"]) == (390, 130)
+    r.price(99)                                             # the 100 order fills
+    for _ in range(3):
+        r.tick()
+    v = r.svc.trade_view(tid)
+    assert v["status"] == L.POSITION_ACTIVE and v["open_qty"] == 130 and len(v["pending_adds"]) == 2
+    r.price(89)                                             # the 90 rung fills and merges
+    for _ in range(3):
+        r.tick()
+    v = r.svc.trade_view(tid)
+    assert v["open_qty"] == 260 and [a["price"] for a in v["pending_adds"]] == [80] and v["entry_avg_price"] == 94      # paper fills at the market: 99 and 89
+
+
+def test_cancel_on_a_waiting_ladder_cancels_every_rung(tmp_path):
+    r, strat, tid = waiting_leg(tmp_path)
+    strat.add_to_leg(tid, {"lots": 2, "price_type": "LIMIT", "entry_price": 90})
+    r.tick()
+    p = r.svc.prepare(tid, "CANCEL")
+    r.svc.cancel_entry(tid, p["token"])
+    for _ in range(3):
+        r.tick()
+    assert r.trade(tid)["status"] == L.CANCELLED
+
+
+def test_cancelling_only_the_main_order_keeps_the_leg_waiting_on_its_rungs(tmp_path):
+    r, strat, tid = waiting_leg(tmp_path)
+    strat.add_to_leg(tid, {"lots": 2, "price_type": "LIMIT", "entry_price": 90})
+    r.tick()
+    main = r.repo.orders(tid, "ENTRY")[0]
+    r.svc.placer.cancel(main, "test: main only")
+    for _ in range(3):
+        r.tick()
+    v = r.svc.trade_view(tid)
+    assert v["status"] == L.ENTRY_PENDING and [a["price"] for a in v["pending_adds"]] == [90]
+
+
+def test_leg_lots_cannot_be_edited_while_rungs_exist(tmp_path):
+    r, strat, tid = waiting_leg(tmp_path)
+    strat.add_to_leg(tid, {"lots": 2, "price_type": "LIMIT", "entry_price": 90})
+    r.tick()
+    plan = r.svc.prepare_edit(tid, {"lots": 3})
+    assert not plan["ok"] and "Add row" in " ".join(plan["errors"])
+    assert r.svc.prepare_edit(tid, {"entry_price": 101})["ok"]   # the leg's own price still edits

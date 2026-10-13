@@ -247,10 +247,12 @@ class TradeService:
         to the whole open quantity on the next tick. The SL / target / trailing settings apply to all of it."""
         with self.lock:
             t = self._get(trade_id)
-            if t["status"] not in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED) or t["pending_exit_reason"]:
+            if t["status"] not in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED, L.ENTRY_PENDING) or t["pending_exit_reason"]:
                 raise ActionError(f"trade is {t['status']}{' (exiting)' if t['pending_exit_reason'] else ''}: "
-                                  "only a running position can be added to")
+                                  "only a running or waiting leg can be added to")
             q = self._derive(t)
+            if q["uncertain"]:
+                raise ActionError("an order of this leg is still being confirmed with Zerodha: retry in a moment")
             if lots < 1:
                 raise ActionError("lots must be 1 or more")
             inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
@@ -568,7 +570,7 @@ class TradeService:
         q = self._derive(t)
         if q["uncertain"]:
             raise ActionError("an order of this trade is still being confirmed with Zerodha; retry in a few seconds")
-        entry = q["entry"]
+        entry = q["first_entry"]                         # the leg's own order (Adds are edited on their own rows)
         entry_working = bool(entry and entry["broker_order_id"] and is_working(entry["status"])
                              and not entry["cancel_requested"])
         inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
@@ -680,6 +682,8 @@ class TradeService:
         if "entry_price" in diff:
             fields["entry_price"] = req.entry_price
         if "lots" in diff:
+            if q["entries"] > 1:
+                errors.append("this leg has Add orders: change lots on each ↳ Add row instead")
             fields.update(lots=req.lots, quantity=req.lots * lot)
         if "stop_loss" in diff:
             fields.update(current_sl=req.stop_loss, user_sl=req.stop_loss, stop_breached_at=None)
@@ -824,6 +828,8 @@ class TradeService:
         # in full, a finished order counts only what it filled (an add that was rejected/cancelled adds nothing)
         intended = sum(o["quantity"] if is_working(o["status"]) else o["filled_qty"] for o in entries)
         return {"orders": orders, "entry": entries[-1] if entries else None, "entries": len(entries),
+                "first_entry": entries[0] if entries else None,
+                "working_entries": [o for o in entries if is_working(o["status"])],
                 "intended": intended, "filled": filled, "entry_avg": entry_avg,
                 "exited": exited, "exit_avg": exit_val / exited if exited else None,
                 "open": filled - exited - (t["outside_qty"] or 0), "realized": round(realized, 2),
@@ -876,6 +882,20 @@ class TradeService:
                              entry_order_id=entry["broker_order_id"])
         if entry["broker_order_id"] and t["entry_order_id"] != entry["broker_order_id"]:
             self.repo.update_trade(t["id"], entry_order_id=entry["broker_order_id"])
+        if q["filled"] == 0 and q["entries"] > 1:
+            working = q["working_entries"]
+            if working:                                   # a ladder still resting: cancel all at a time exit
+                reason = self._time_exit_reason(t, now)
+                if reason:
+                    for e in working:
+                        if not e["cancel_requested"] and e["broker_order_id"]:
+                            self.placer.cancel(e, f"{reason} before the entry filled")
+                    self._resync = True
+                else:
+                    inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+                    self._mark(t, q, self._ltp_safe(inst, max_age=self.cfg.quote_slow_s), now)
+                return
+            entry = q["first_entry"]                      # all ended unfilled: decided by the leg's own order
         if q["filled"] == 0:
             if entry["status"] == "NOT_PLACED":
                 self._transition(t, L.REJECTED, "ENTRY_NOT_PLACED", "WARNING",
@@ -900,7 +920,7 @@ class TradeService:
                     ltp = self._ltp_safe(inst, max_age=self.cfg.quote_slow_s)
                     self._mark(t, q, ltp, now)
             return
-        if is_terminal(entry["status"]) and t["status"] in (L.ENTRY_ORDER_PLACED, L.ENTRY_PENDING):
+        if is_terminal(q["first_entry"]["status"]) and t["status"] in (L.ENTRY_ORDER_PLACED, L.ENTRY_PENDING):
             self._transition(t, L.ENTRY_EXECUTED, "ENTRY_COMPLETE", "INFO",
                              {"filled_qty": q["filled"], "avg_price": q["entry_avg"], "entry_status": entry["status"]})
 
@@ -1526,10 +1546,11 @@ class TradeService:
                 v["limit_exit"] = {**json.loads(t["pending_limit_exit"]), "filled": 0, "status": "PLACING"}
         # Adds still resting at Zerodha (each shown as its own row until it fills and merges into the position)
         v["pending_adds"] = []
-        if t["status"] in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED):
+        if t["status"] in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED, L.ENTRY_PENDING, L.ENTRY_ORDER_PLACED):
             v["pending_adds"] = [{"id": o["id"], "order_id": o["broker_order_id"], "qty": o["quantity"],
                                   "filled": o["filled_qty"], "price": o["price"], "status": o["status"]}
                                  for o in self.repo.orders(t["id"], "ENTRY")[1:] if is_working(o["status"])]
+        v["base_qty"] = t["quantity"] - sum(a["qty"] - (a["filled"] or 0) for a in v["pending_adds"])
         return v
 
     def breeze_login(self) -> dict:
