@@ -930,7 +930,7 @@ function wireLiveLtp(t) {
   show(); fetchLtp();
   el.onclick = (ev) => {
     ev.preventDefault();
-    if (ltp == null) return;
+    if (ltp == null || !el.dataset.ltpInto) return;          // display only when there is no box to fill
     const box = $(el.dataset.ltpInto);
     box.value = toTick(Number(ltp), tick);
     box.dispatchEvent(new Event("input", {bubbles: true}));
@@ -1155,6 +1155,7 @@ const EXIT_REASONS = {
   LIMIT_EXIT: "Exited at your limit", STRATEGY_LOSS_LIMIT: "Max loss hit", STRATEGY_PROFIT_LOCKED: "Locked profit (combined SL)", STRATEGY_PROFIT_TARGET: "Max profit booked", STRATEGY_TRAIL_STOP: "Trailing profit stop",
 };
 function legStatus(t) {
+  if (t.status === "ERROR") return {text: "Needs attention", cls: "bad"};
   if (t.pending_exit_reason) return {text: `Exiting · ${EXIT_REASONS[t.pending_exit_reason] || t.pending_exit_reason}`, cls: "warn"};
   switch (t.status) {
     case "POSITION_ACTIVE": case "ENTRY_EXECUTED": return {text: "Running", cls: "run"};
@@ -1197,7 +1198,8 @@ function strategyCard(s) {
     const canCancel = ["ENTRY_ORDER_PLACED", "ENTRY_PENDING"].includes(t.status) && t.filled_qty === 0;
     // Add = more lots of this contract on a running leg; Re-buy / Re-sell = enter a closed leg again.
     // Both place a NEW leg in this strategy (its own SL/target).
-    const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0;
+    const canResume = t.status === "ERROR" && (t.open_qty || 0) > 0;   // e.g. its exit kept failing: back under the algo
+    const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !canResume && t.status !== "UNKNOWN_REQUIRES_RECONCILIATION";
     const adds = t.pending_adds || [];       // Adds still resting: each its own row below, merged when it fills
     const qtyText = adds.length ? `${t.base_qty ?? t.open_qty}` :
       (t.filled_qty || 0) > 0 && t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
@@ -1216,7 +1218,10 @@ function strategyCard(s) {
       ${canCancel ? `<button type="button" class="leg-del" data-leg-cancel="${t.id}" title="Cancel this unfilled leg">✕</button>` : ""}
       ${canExit ? `<button type="button" class="add-btn" data-leg-add="${t.id}" title="Add lots to this leg">Add</button>` : ""}
       ${canExit ? `<button type="button" class="danger" data-leg-exit="${t.id}">Exit</button>` : ""}
-      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Buy or sell this contract again">Re-enter</button>` : ""}</td></tr>
+      ${canReenter ? `<button type="button" class="add-btn" data-leg-reenter="${t.id}" title="Buy or sell this contract again">Re-enter</button>` : ""}
+      ${canResume ? `<button type="button" class="edit-btn" data-leg-resume="${t.id}" title="${esc(t.error || "")} - put it back under the algo (SL re-placed)">Resume</button>` : ""}</td></tr>
+    ${canResume ? `<tr class="add-row"><td></td><td colspan="10" class="leg-error">⚠ ${esc(t.error || "the algo stopped managing this leg")}.
+      <b>No stop-loss is active.</b> Resume puts it back under the algo (SL order re-placed at ${num(t.current_sl)}), or exit it in Kite.</td></tr>` : ""}
     ${t.limit_exit ? `<tr class="add-row"><td></td><td class="sym">↳ Exit at limit <small>(SL protects the rest meanwhile)</small></td>
       <td class="num">${t.limit_exit.qty}</td><td></td><td class="num">${num(t.limit_exit.price)}</td><td></td><td></td><td></td><td></td>
       <td><span class="leg-st ${t.limit_exit.filled ? "part" : "wait"}">${t.limit_exit.status === "PLACING" ? "Placing…"
@@ -1438,6 +1443,51 @@ async function exitLeg(tid) {
     }
     refreshStrategies();
   } catch (e) { alertBox("Not exited", [e.message]); }
+}
+
+// A leg in ERROR (its exits kept failing, ...): you set the SL / target FIRST (checked against the live price, so
+// resuming never exits by itself), then Zerodha's position is checked and the leg is managed again.
+async function resumeLeg(tid, prefill = null, err = "") {
+  const t = (await api(`/api/trades/${tid}`)).trade;
+  const sl0 = prefill ? prefill.sl : t.current_sl, tp0 = prefill ? prefill.tp : (t.target ?? "");
+  const below = t.side === "BUY";
+  const pending = dialog("Resume this leg", `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${t.open_qty} ${contractName(t)}</div>
+    ${liveLtpLine("")}
+    ${err ? `<p class="resume-err">⚠ ${esc(err)}</p>` : ""}
+    <div class="edit-leg-grid">
+      <label>Stop-loss ₹ <small>(${below ? "below" : "above"} the LTP)</small>
+        <input id="resume-sl" type="number" step="any" min="0" value="${sl0 ?? ""}"></label>
+      <label>Target ₹ <small>(blank = none)</small>
+        <input id="resume-tp" type="number" step="any" min="0" value="${tp0 ?? ""}"></label>
+    </div>
+    <p class="hint small" id="resume-hint"></p>
+    <p class="hint small">Then the algo checks Zerodha holds this position, drops the failed exit
+      (${esc(t.pending_exit_reason || "–")}), places the SL order at your SL and Edit / Exit come back${t.order_type === "BTST" ? "; this BTST leg gets no auto-exit time" : ""}.
+      Outside market hours nothing is sent until the open.</p>`, MODE === "LIVE");
+  okButton("Resume");
+  wireLiveLtp(t);
+  // live check: an SL already through the price would exit the moment the leg resumes
+  const ltpNow = () => Number(($("#dlg-body .live-ltp b")?.textContent || "").replace(/[^\d.]/g, "")) || null;
+  const check = () => {
+    const ltp = ltpNow(), sl = Number($("#resume-sl").value), tp = $("#resume-tp").value === "" ? null : Number($("#resume-tp").value);
+    let msg = "";
+    if (ltp && sl && (below ? sl >= ltp : sl <= ltp)) msg = `SL ${sl} is through the LTP ${ltp}: set it ${below ? "below" : "above"} ${ltp}.`;
+    else if (ltp && tp != null && (below ? tp <= ltp : tp >= ltp)) msg = `Target ${tp} is already reached at ${ltp}.`;
+    else if (ltp && sl) msg = `Risk from here: ₹${Math.round(Math.abs(ltp - sl) * t.open_qty).toLocaleString("en-IN")} if the SL is hit.`;
+    const h = $("#resume-hint");
+    if (h) { h.textContent = msg; h.classList.toggle("resume-err", /through|reached/.test(msg)); }
+  };
+  ["#resume-sl", "#resume-tp"].forEach((q) => $(q).addEventListener("input", check));
+  const timer = setInterval(() => { if (!$("#resume-hint")) return clearInterval(timer); check(); }, 1000);
+  const ok = await pending;
+  clearInterval(timer);
+  const vals = {sl: $("#resume-sl")?.value ?? sl0, tp: $("#resume-tp")?.value ?? tp0};
+  if (!ok) return;
+  try {
+    await api(`/api/trades/${tid}/resume`, {stop_loss: vals.sl === "" ? null : Number(vals.sl),
+                                             target: vals.tp === "" ? null : Number(vals.tp)});
+    refreshStrategies();
+  } catch (e) { return resumeLeg(tid, vals, e.message); }      // back to the pop-up, values kept
 }
 
 // Move a strategy's stop-losses between Zerodha (a resting SL order) and local (watched by the algo).
@@ -1771,6 +1821,8 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (mid) return legToMarket(Number(mid));
   const cid = ev.target.dataset.legCancel;
   if (cid) return cancelLeg(Number(cid));
+  const resId = ev.target.dataset.legResume;
+  if (resId) return resumeLeg(Number(resId));
   const eid = ev.target.dataset.legEdit;
   if (eid) return editLeg(Number(eid));
   const xid = ev.target.dataset.exits;

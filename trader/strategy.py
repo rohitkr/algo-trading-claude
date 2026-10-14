@@ -175,6 +175,8 @@ class StrategyService:
             # (validate()'s "auto-exit time has already passed"), same as leaving it blank.
             auto_exit = (cfg.square_off_time.strftime("%H:%M")
                         if cfg.square_off_time and cfg.square_off_time > now.time() else None)
+            if cfg.order_type == "BTST":
+                auto_exit = None          # carried overnight: the square-off time must not close it today
             # The strategy exists BEFORE its legs are checked, so every leg is risk-checked as part of it: the
             # whole strategy is ONE position for max-open-trades / trades-per-day (risk.pre_trade), and a leg
             # never blocks its own siblings (the old bug: an iron condor's SELL legs refused as "3 open").
@@ -251,6 +253,8 @@ class StrategyService:
             now = self.svc.clock()
             auto_exit = (cfg.square_off_time.strftime("%H:%M")
                          if cfg.square_off_time and cfg.square_off_time > now.time() else None)
+            if cfg.order_type == "BTST":
+                auto_exit = None
             # re-entering a closed leg may take either side; adding to a running leg is always its own side
             side = str(payload.get("side") or t["side"]).upper()
             if side != t["side"] and t["status"] in L.OPEN_STATUSES:
@@ -370,6 +374,8 @@ class StrategyService:
         if not legs:
             return
         open_legs = [t for t in legs if t["status"] in L.OPEN_STATUSES]
+        if open_legs and not self.svc.cfg.market_open(open_legs[0]["underlying"], now):
+            return                        # combined exits / SL moves act only while the exchange trades
         if cfg.move_sl_to_cost_enabled and cfg.move_sl_to_cost_at:
             for t in open_legs:
                 self._move_sl_to_cost(t, cfg)
@@ -520,6 +526,8 @@ class StrategyService:
                 raise ActionError(f"no strategy {strategy_id}")
             legs = self.repo.trades_by_group(strategy_id)
             open_legs = [t for t in legs if t["status"] in L.OPEN_STATUSES]
+            if open_legs and not self.svc.cfg.market_open(open_legs[0]["underlying"], self.svc.clock()):
+                raise ActionError("the market is closed: exit when it opens (the SL orders stay at Zerodha meanwhile)")
             self._exit_all(s, open_legs, "USER_EXIT")
             self.svc._tick_locked()               # place the exits now (same as a single leg's Exit)
             return self.view(strategy_id)

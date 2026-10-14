@@ -517,3 +517,6 @@ table.order-confirm td:last-child button + button { margin-left: 4px; }
 .sl-tag { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--accent);
   border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; margin-left: 3px; vertical-align: 1px; }
 .ex-chip b.sl-local { color: var(--accent); }
+/* a leg the algo stopped managing (ERROR): why, and what Resume does */
+.legs-live td.leg-error { color: var(--sell); font-size: 12px; white-space: normal; padding-top: 2px; }
+.resume-err { color: var(--sell); font-weight: 600; }

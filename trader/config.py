@@ -157,6 +157,11 @@ class TraderConfig:
         return self.max_loss_per_trade or 10_000.0
     require_ltp_for_entry: bool = True
     fast_poll_seconds: float = 0.7           # TRADER_FAST_POLL_SECONDS: tick cadence while an exit is in progress
+    # No automatic exit / SL order change while the exchange is closed (after 15:30 Zerodha rejects them as
+    # "could not be converted to an AMO", and an exit cancels the SL first). TRADER_MARKET_HOURS_GUARD, LIVE default on.
+    market_hours_guard: bool = False
+    nse_market_hours: tuple = (time(9, 15), time(15, 30))
+    mcx_market_hours: tuple = (time(9, 0), time(23, 30))
     sl_local_default: bool = False           # TRADER_SL_MODE=LOCAL: new strategies keep their SL in the algo, not Zerodha
     local_sl_poll_seconds: float = 1.0       # TRADER_LOCAL_SL_POLL_SECONDS: tick cadence while a local-SL leg is open
     allow_add_to_symbol: bool = True
@@ -185,6 +190,14 @@ class TraderConfig:
 
     def freeze_for(self, underlying: str) -> int:
         return int(self.freeze_qty.get(underlying.upper(), 1800))
+
+    def market_open(self, underlying: str, now) -> bool:
+        """The exchange is trading now (weekdays, regular hours; holidays are not known here). Always True when
+        TRADER_MARKET_HOURS_GUARD is off."""
+        if not self.market_hours_guard:
+            return True
+        start, end = self.mcx_market_hours if exchange_for(underlying) == "MCX" else self.nse_market_hours
+        return now.weekday() < 5 and start <= now.time() < end
 
     def session_for(self, underlying: str) -> tuple[time | None, time | None, time | None]:
         """(entry start, entry end, square-off) for this underlying's exchange."""
@@ -249,6 +262,8 @@ class TraderConfig:
             allow_add_to_symbol=_bool(g("TRADER_ALLOW_ADD_TO_SYMBOL", "true")),
             fast_poll_seconds=float(g("TRADER_FAST_POLL_SECONDS", d.fast_poll_seconds)),
             sl_local_default=_sl_mode(g("TRADER_SL_MODE", "ZERODHA")),
+            market_hours_guard=_bool(g("TRADER_MARKET_HOURS_GUARD",
+                                       "true" if g("TRADER_MODE", "PAPER").strip().strip("'\"").upper() == "LIVE" else "false")),
             local_sl_poll_seconds=float(g("TRADER_LOCAL_SL_POLL_SECONDS", d.local_sl_poll_seconds)),
             hostnames=tuple(h.strip().lower() for h in g("TRADER_HOSTNAMES", ",".join(d.hostnames)).split(",")
                             if h.strip()),

@@ -192,6 +192,12 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                                                           float(body["price"]) if body.get("price") not in (None, "") else None,
                                                           int(body["add_id"]) if body.get("add_id") not in (None, "") else None,
                                                           int(body["lots"]) if body.get("lots") not in (None, "") else None))
+                m = re.fullmatch(r"/api/trades/(\d+)/resume", u.path)
+                if m:
+                    kw = {"stop_loss": body.get("stop_loss")}
+                    if "target" in body:
+                        kw["target"] = body.get("target")
+                    return self._json(200, svc.resume_trade(int(m.group(1)), **kw))
                 m = re.fullmatch(r"/api/trades/(\d+)/entry_market", u.path)
                 if m:
                     return self._json(200, svc.entry_to_market(int(m.group(1))))

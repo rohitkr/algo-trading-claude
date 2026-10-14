@@ -407,6 +407,7 @@ class TradeService:
                 raise ActionError(f"trade is {t['status']}; nothing to exit")
             if t["pending_exit_reason"]:
                 raise ActionError(f"an exit is already in progress ({t['pending_exit_reason']})")
+            self._require_market(t)
             self.repo.update_trade(trade_id, pending_exit_reason=L.USER_EXIT)
             self.audit(trade_id, "EXIT_REQUESTED", "INFO", {"reason": L.USER_EXIT})
             self._tick_locked()           # fresh broker snapshot, position verified, then the exit
@@ -418,6 +419,7 @@ class TradeService:
         confirm_partial_exit(token)."""
         with self.lock:
             t = self._get(trade_id)
+            self._require_market(t)
             if t["status"] not in L.LIVE_STATUSES:
                 raise ActionError(f"trade is {t['status']}; nothing to exit")
             if t["pending_exit_reason"]:
@@ -449,6 +451,7 @@ class TradeService:
             t = self._get(trade_id)
             if t["status"] not in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED):
                 raise ActionError(f"trade is {t['status']}: only a running position can be exited at a limit")
+            self._require_market(t)
             if t["pending_exit_reason"]:
                 raise ActionError(f"an exit is already in progress ({t['pending_exit_reason']})")
             q = self._derive(t)
@@ -751,6 +754,74 @@ class TradeService:
         with self.lock:
             return self._tick_locked()
 
+    def _require_market(self, t: dict) -> None:
+        if not self.cfg.market_open(t["underlying"], self.clock()):
+            raise ActionError("the market is closed: exit when it opens (the SL order stays at Zerodha meanwhile)")
+
+    _KEEP = object()
+
+    def resume_trade(self, trade_id: int, stop_loss: float | None = None, target=_KEEP) -> dict:
+        """A leg in ERROR (e.g. its exit orders kept failing) back under the algo: only when Zerodha holds exactly
+        the position our fills say. You choose the SL (and target) first - it must be on the safe side of the live
+        price, so resuming never exits at once by itself. Clears the failed exit; the next tick places the SL order.
+        A BTST leg also drops its auto-exit time. target: a price, None = no target, omitted = keep."""
+        t = self._get(trade_id)
+        if t["status"] != L.ERROR:
+            raise ActionError(f"trade is {t['status']}: only a leg in ERROR can be resumed")
+        inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+        ltp = self._ltp_safe(inst, max_age=0)                     # a fresh price, outside the lock
+        if not ltp:
+            raise ActionError("no live price for this contract right now: try again in a moment")
+        buy = t["side"] == "BUY"
+        tick = t["tick_size"]
+        sl = float(stop_loss if stop_loss not in (None, "") else t["current_sl"])
+        sl = round_to_tick(sl, tick, "SELL" if buy else "BUY")
+        if sl <= 0 or (sl >= ltp if buy else sl <= ltp):
+            raise ActionError(f"SL {sl:g} is already through the live price {ltp:g}: set it "
+                              f"{'below' if buy else 'above'} {ltp:g} (or exit the position instead)")
+        tp = t["target"] if target is self._KEEP else (None if target in (None, "") else float(target))
+        if tp is not None:
+            tp = round_to_tick(tp, tick, "BUY" if buy else "SELL")
+            if tp <= ltp if buy else tp >= ltp:
+                raise ActionError(f"target {tp:g} is already reached at the live price {ltp:g}: set it "
+                                  f"{'above' if buy else 'below'} {ltp:g}, or leave it blank")
+        with self.lock:
+            t = self._get(trade_id)
+            if t["status"] != L.ERROR:
+                raise ActionError(f"trade is {t['status']}: only a leg in ERROR can be resumed")
+            try:
+                snap = self.broker.snapshot(self.clock())
+            except Exception as exc:
+                self._broker_error("snapshot (resume)", exc)
+                raise ActionError(f"cannot reach Zerodha: {exc}") from None
+            self.placer.sync(snap)
+            q = self._derive(t)
+            if q["uncertain"]:
+                raise ActionError("an order of this leg is still being confirmed with Zerodha: retry in a moment")
+            expected = L.direction(t["side"]) * q["open"]
+            actual = self._broker_share(t, q, snap)
+            if q["open"] <= 0 or actual != expected:
+                raise ActionError(f"Zerodha position {actual} does not match this leg ({expected}): check it in Kite")
+            if any(is_working(o["status"]) and o["kind"] == "EXIT" for o in q["orders"]):
+                raise ActionError("an exit order of this leg is still working at Zerodha: cancel it in Kite first")
+            # An SL order still working from before may already have triggered (the price went through it): moving
+            # it would fill it at once. Take it off; a fresh one goes in at your SL once the cancel is confirmed.
+            for o in q["orders"]:
+                if o["kind"] == "SL" and is_working(o["status"]) and o["broker_order_id"] and not o["cancel_requested"]:
+                    self.placer.cancel(o, "resume: replaced by a new SL order at your SL")
+                    self._resync = True
+            now = self.clock()
+            keep_auto = (t["auto_exit_at"] and t.get("order_type") != "BTST"
+                         and datetime.fromisoformat(t["auto_exit_at"]) > now)
+            self._transition(t, L.POSITION_ACTIVE, "RESUMED_BY_USER", "WARNING",
+                             {"from": L.ERROR, "error": t["error"], "open_qty": q["open"], "ltp": ltp,
+                              "sl": [t["current_sl"], sl], "target": [t["target"], tp]},
+                             error=None, pending_exit_reason=None, exit_attempts=0, stop_breached_at=None,
+                             mismatch_count=0, auto_exit_at=t["auto_exit_at"] if keep_auto else None,
+                             current_sl=sl, user_sl=sl, sl_auto=0, target=tp)
+            self._tick_locked()
+            return {"ok": True, "trade": self.trade_view(trade_id)}
+
     def local_watch(self) -> bool:
         """A position whose stop-loss only the algo watches (local SL) is open: the monitor then ticks every
         TRADER_LOCAL_SL_POLL_SECONDS, since nothing rests at Zerodha to catch the stop between ticks."""
@@ -981,6 +1052,10 @@ class TradeService:
         ltp = self._ltp_safe(inst, max_age=self._price_age(t, now))
         self._mark(t, q, ltp, now)
         self._mark_kite_ltp(t, snap)   # display only (Active-trades table); SL/target/trailing stay on Breeze
+        if not self.cfg.market_open(t["underlying"], now):
+            # Exchange closed: nothing is sent (Zerodha rejects it, and an exit would first cancel the resting
+            # SL, leaving the position bare overnight). Everything resumes at the next open.
+            return
         if t["pending_exit_reason"]:
             self._continue_exit(t, q, ltp, now)
             return
@@ -1432,13 +1507,14 @@ class TradeService:
         return self.cfg.quote_ttl_s if fast else self.cfg.quote_slow_s
 
     def _time_exit_reason(self, t: dict, now: datetime) -> str | None:
-        if t["auto_exit_at"] and now >= datetime.fromisoformat(t["auto_exit_at"]):
-            return L.AUTO_EXIT
         # BTST is an app-level "carry overnight" label (Zerodha has no BTST product for F&O): its trades
-        # skip the global intraday square-off and simply stay open, resumed by this engine on restart same
-        # as any other open trade, until their own auto-exit time, SL, target or a manual exit closes them.
+        # skip the global intraday square-off AND any auto-exit time (a strategy's square-off time used to
+        # close a BTST leg the same evening) and stay open, resumed by this engine on restart, until their
+        # SL, target or a manual exit closes them.
         if t.get("order_type") == "BTST":
             return None
+        if t["auto_exit_at"] and now >= datetime.fromisoformat(t["auto_exit_at"]):
+            return L.AUTO_EXIT
         square_off = self.cfg.session_for(t["underlying"])[2]
         if square_off and now.time() >= square_off:
             return L.SQUARE_OFF
