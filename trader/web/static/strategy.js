@@ -875,13 +875,20 @@ function collectConfig() {
 }
 
 // ---------------------------------------------------------------- dialogs
+// Cancel is a plain button (not a submit), so Enter in any box submits = the OK button, never Cancel.
+$("#dlg-cancel").addEventListener("click", () => $("#dlg").close("cancel"));
 function dialog(title, html, live = false) {
   const d = $("#dlg");
   $("#dlg-title").textContent = title;
   $("#dlg-body").innerHTML = html;
   $("#dlg-live").classList.toggle("hidden", !live);
   okButton("Confirm");
-  return new Promise((resolve) => { d.onclose = () => resolve(d.returnValue === "ok"); d.returnValue = ""; d.showModal(); });
+  return new Promise((resolve) => {
+    d.onclose = () => resolve(d.returnValue === "ok"); d.returnValue = ""; d.showModal();
+    // focus: the first price/qty box if there is one (Enter there submits), else the OK button - never Cancel
+    const box = [...$("#dlg-body").querySelectorAll("input[type=number], input[type=text]")].find((i) => !i.disabled && i.offsetParent);
+    (box || $("#dlg-ok")).focus();
+  });
 }
 // The dialog's OK button: "Buy" / "Sell" (coloured by side) for an order, "Confirm" otherwise.
 function okButton(text, side) {
@@ -1053,6 +1060,7 @@ function confirmOrders(active) {
     d.returnValue = "";
     draw();
     d.showModal();
+    $("#dlg-ok").focus();                       // Enter = place the orders (not the first toggle / Cancel)
   });
 }
 
@@ -1084,6 +1092,7 @@ async function confirmTight(warnings) {
   return pending;
 }
 
+// Trade all: the Place order pop-up (legs, order, Limit/Market, LTP) - the one check before a new strategy goes in.
 $("#trade-all").onclick = async () => {
   const active = LEGS.filter((l) => l.checked);
   if (!active.length) return alertBox("Nothing to trade", ["select at least one leg"]);
@@ -1116,11 +1125,15 @@ async function exitQty(t, qty) {
   return api(`/api/trades/${t.id}/partial/confirm`, {token: p.token});
 }
 
-async function exitStrategy(id) {
+async function exitStrategy(id, choose = false) {
   try {
     const s = (await api(`/api/strategies/${id}`)).strategy;
     const openLegs = s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason);
     if (!openLegs.length) return alertBox("Nothing to exit", ["no open legs on this strategy"]);
+    if (!choose) {                                   // one click: everything at market, now
+      await api(`/api/strategies/${id}/exit`, {});
+      return refreshStrategies();
+    }
     const rows = openLegs.map((t) => {
       const lots = Math.floor(t.open_qty / t.lot_size);
       return `<tr><td>${esc(t.side)} ${esc(t.tradingsymbol)}</td><td>${lots} lot(s) open</td>
@@ -1384,9 +1397,6 @@ async function editLeg(tid) {
     if (!p.ok && (p.errors || []).join() === "nothing changed") return;   // saved without changes: just close
     if (!p.ok) return alertBox("Edit not allowed", p.errors || []);
     if (!Object.keys(p.diff).length) return;   // nothing actually changed
-    const rows = Object.entries(p.diff).map(([k, [a, b]]) => `<tr><td>${esc(k)}</td><td>${esc(a ?? "–")}</td><td>→ <b>${esc(b ?? "–")}</b></td></tr>`).join("");
-    const ok = await dialog("Apply this change?", `<table>${rows}</table>`, MODE === "LIVE");
-    if (!ok) return;
     await api(`/api/trades/${tid}/edit/apply`, {token: p.token});
     refreshStrategies();
   } catch (e) { alertBox("Edit failed", [e.message]); }
@@ -1636,12 +1646,6 @@ async function legToMarket(tid) {
   try {
     const t = (await api(`/api/trades/${tid}`)).trade;
     const ltp = t.kite_ltp ?? t.last_ltp;
-    const pending = dialog(`${t.side === "BUY" ? "Buy" : "Sell"} at market?`,
-      `<div class="big-side ${esc(t.side)}">${esc(t.side)} ${contractName(t)} · ${t.quantity} qty</div>
-       <p class="hint small">Limit ${num(t.entry_price)} → about ${ltp != null ? num(ltp) : "the live price"} (a marketable limit, so it fills
-       now but never at an absurd price). SL ${num(t.current_sl)} stays${t.sl_auto ? " (automatic: moves with the price)" : ""}.</p>`, MODE === "LIVE");
-    okButton(t.side === "BUY" ? "Buy now" : "Sell now", t.side);
-    if (!(await pending)) return;
     const r = await api(`/api/trades/${tid}/entry_market`, {});
     $("#form-hint").textContent = `${t.side} ${t.tradingsymbol}: limit moved to ${num(r.price)} (LTP ${num(r.ltp)})`;
     refreshStrategies();
@@ -1670,12 +1674,6 @@ async function addOrder(tid, action, addId) {
       lots = Math.floor(Number($("#add-edit-lots").value)) || null;
     } else if (action === "cancel") {
       // cancelling a waiting add: one click, no confirmation (it only withdraws an unfilled order)
-    } else {
-      const pending = dialog("Fill the add at market?",
-        `<div class="big-side ${esc(t.side)}">${what} @ ${num(pa.price)}</div>
-         <p class="hint small">The limit moves to the live price (a marketable limit) so it fills now.</p>`, MODE === "LIVE");
-      okButton(t.side === "BUY" ? "Buy now" : "Sell now", t.side);
-      if (!(await pending)) return;
     }
     await api(`/api/trades/${tid}/add_order`, {action, price, lots, add_id: addId});
     refreshStrategies();
