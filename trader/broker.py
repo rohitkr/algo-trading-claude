@@ -218,6 +218,14 @@ def build_broker(cfg, *, cli_live: bool, zcfg=None, kite=None, paper_kite=None) 
     if missing:
         raise LiveTradingNotEnabled("live trading is not enabled; missing: " + ", ".join(missing))
     if kite is None:
-        from zerodha.auth import connected_kite
-        kite = connected_kite(zcfg)
+        from zerodha.auth import LoginRequired, connected_kite, new_kite
+        try:
+            kite = connected_kite(zcfg)
+        except LoginRequired as exc:
+            # Start anyway, logged out: every tick's Zerodha read fails, so nothing is sent (the engine never acts
+            # without a fresh snapshot) and the header light is red. Click it to log in; the token is set on THIS
+            # client (trader.zerodha_login), no restart.
+            import logging
+            logging.getLogger("trader").warning("starting without a Zerodha session (%s): log in from the page", exc)
+            kite = new_kite(zcfg)
     return KiteTraderBroker(kite, live=True)

@@ -87,6 +87,12 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                     return self._json(200, {**svc.meta(), "streaming": bool(hub and hub.streaming)})
                 if u.path == "/api/stream":
                     return self._stream()
+                if u.path == "/api/breeze/login":
+                    bl = app.breeze_login
+                    return self._json(200, {"available": bl is not None, "status": bl.status if bl else None})
+                if u.path == "/api/zerodha/login":
+                    zl = app.zerodha_login
+                    return self._json(200, {"available": zl is not None, "status": zl.status if zl else None})
                 if u.path == "/api/dashboard":
                     return self._json(200, svc.dashboard())
                 if u.path == "/api/strikes":
@@ -245,6 +251,26 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                         sid = int(body.get("signal_id") or 0)
                         res = tr.approve(sid) if u.path.endswith("approve") else tr.skip(sid)
                         return self._json(200, {"ok": True, "action": res})
+                    except ValueError as exc:
+                        return self._json(400, {"error": str(exc)})
+                if u.path == "/api/breeze/login":
+                    if app.breeze_login is None:
+                        return self._json(400, {"error": "Breeze API key / secret are not set in .env"})
+                    try:
+                        host = self.headers.get("Host", "")
+                        if body.get("paste"):
+                            return self._json(200, app.breeze_login.submit_url(str(body["paste"])))
+                        return self._json(200, app.breeze_login.start(f"http://{host}/" if host else None))
+                    except ValueError as exc:
+                        return self._json(400, {"error": str(exc)})
+                if u.path == "/api/zerodha/login":
+                    if app.zerodha_login is None:
+                        return self._json(400, {"error": "Kite API key / secret are not set in .env"})
+                    try:
+                        host = self.headers.get("Host", "")
+                        if body.get("paste"):
+                            return self._json(200, app.zerodha_login.submit_url(str(body["paste"])))
+                        return self._json(200, app.zerodha_login.start(f"http://{host}/" if host else None))
                     except ValueError as exc:
                         return self._json(400, {"error": str(exc)})
                 if u.path == "/api/strategies/margin":

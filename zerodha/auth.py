@@ -117,6 +117,12 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             return
         if token:
             self.server.request_token = token
+            back = getattr(self.server, "return_to", None)          # started from the trader page: close this tab
+            if back:
+                self._reply(200, "Zerodha login complete",
+                            f'Back to <a href="{html.escape(back)}">the trader</a>; this tab closes itself.'
+                            '<script>setTimeout(function(){window.close()},800)</script>')
+                return
             self._reply(200, "Login complete", "You can close this tab and return to the terminal.")
         else:
             self.server.error = error

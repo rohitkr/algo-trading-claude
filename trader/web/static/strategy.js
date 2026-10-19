@@ -1102,7 +1102,10 @@ $("#trade-all").onclick = async () => {
   $("#trade-all").disabled = true;
   try {
     const res = await api("/api/strategies/trade_all", {config: collectConfig(), legs: ordered, keep_order: true});
-    if (!res.ok) return alertBox("Not placed", res.errors || ["unknown error"]);
+    if (!res.ok) {
+      if (await offerExitInstead(res.errors || [], ordered)) return;
+      return alertBox("Not placed", res.errors || ["unknown error"]);
+    }
     $("#form-hint").textContent = `Strategy #${res.strategy_id}: ${res.confirmed.length} leg(s) placed` +
       (res.failed.length ? `, ${res.failed.length} NOT placed - see the strategy card below` : "");
     // never let a missing leg go unnoticed: say which legs did not go in, and why
@@ -1111,6 +1114,38 @@ $("#trade-all").onclick = async () => {
   } catch (e) { alertBox("Error", [e.message]); }
   finally { $("#trade-all").disabled = false; }
 };
+// A leg refused because an open trade of this app holds the opposite side of the same contract (e.g. SELL 23000 CE
+// while #313 is long it): that SELL is really an exit. Ask, and on Execute exit that trade (its own exit path, so the
+// books and the SL order stay right) instead of opening a second, opposite trade.
+async function offerExitInstead(errors, legs) {
+  const hits = errors.map((e) => e.match(/^leg (\d+) .*no_opposite_trade_in_symbol \(trade\(s\) \[([\d, ]+)\]/)).filter(Boolean);
+  if (!hits.length || hits.length !== errors.length) return false;    // other problems too: show them as before
+  const plan = [];
+  for (const [, legNo, ids] of hits) {
+    const leg = legs[Number(legNo) - 1];
+    let want = leg ? Number(leg.lots) * (Number(leg.lot_size) || 0) : 0;
+    for (const id of ids.split(",").map((x) => Number(x.trim()))) {
+      const t = (await api(`/api/trades/${id}`)).trade;
+      if (!(t.open_qty > 0)) continue;
+      const qty = want > 0 ? Math.min(t.open_qty, Math.floor(want / t.lot_size) * t.lot_size) : t.open_qty;
+      if (qty > 0) plan.push({t, qty});
+      want -= qty;
+    }
+  }
+  if (!plan.length) return false;
+  const rows = plan.map(({t, qty}) => `<li><b>#${t.id}</b> ${esc(t.side)} ${t.open_qty} ${contractName(t)} open →
+    exit <b>${qty}</b>${qty < t.open_qty ? ` (${t.open_qty - qty} stay open)` : ""} at market</li>`).join("");
+  const pending = dialog("Position already open", `<p>This contract is already open in your positions:</p><ul>${rows}</ul>
+    <p class="hint small">Execute exits it (the SL order is taken off first) instead of placing a new opposite trade.</p>`, MODE === "LIVE");
+  okButton("Execute", plan[0].t.side === "BUY" ? "SELL" : "BUY");
+  if (!(await pending)) return true;
+  try {
+    for (const {t, qty} of plan) await exitQty(t, qty);
+    $("#form-hint").textContent = plan.map(({t, qty}) => `#${t.id}: exiting ${qty}`).join(", ");
+    refreshStrategies();
+  } catch (e) { alertBox("Not exited", [e.message]); }
+  return true;
+}
 $("#save-draft").onclick = () => alertBox("Drafts", ["Saving drafts for later/recurring runs is planned for a later phase; Trade All places the strategy now."]);
 
 // ---------------------------------------------------------------- active strategies
@@ -1214,15 +1249,20 @@ function strategyCard(s) {
     const canResume = t.status === "ERROR" && (t.open_qty || 0) > 0;   // e.g. its exit kept failing: back under the algo
     const canReenter = !LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !canResume && t.status !== "UNKNOWN_REQUIRES_RECONCILIATION";
     const adds = t.pending_adds || [];       // Adds still resting: each its own row below, merged when it fills
-    const qtyText = adds.length ? `${t.base_qty ?? t.open_qty}` :
-      (t.filled_qty || 0) > 0 && t.open_qty !== t.quantity ? `${t.quantity} <small>(open ${t.open_qty})</small>` : t.quantity;
+    // Qty = what you hold NOW (open qty) while the leg runs; resting adds show on their own rows. Closed or not yet
+    // filled: the leg's quantity. The full history is in the ▸ fills.
+    const holding = (t.filled_qty || 0) > 0 && LEG_LIVE_STATUSES.has(t.status);
+    const qtyText = holding ? `<span title="filled ${t.filled_qty}, exited ${t.filled_qty - t.open_qty}">${t.open_qty}</span>`
+      : (t.filled_qty || 0) > 0 ? t.filled_qty : t.quantity;
     const st = legStatus(t);
-    return `<tr><td><span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
+    const hasFills = (t.filled_qty || 0) > 0;
+    return `<tr><td>${hasFills ? `<button type="button" class="leg-tog" data-leg-toggle="${t.id}" aria-expanded="${LEG_OPEN.has(t.id)}"
+      title="${LEG_OPEN.has(t.id) ? "Hide" : "Show"} every entry / exit of this leg">${LEG_OPEN.has(t.id) ? "▾" : "▸"}</button>` : ""}<span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
     <td class="sym" title="${esc(t.tradingsymbol)}">${contractName(t)}</td><td class="num">${qtyText}</td>
     <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
     <td class="num">${t.exit_avg_price != null ? num(t.exit_avg_price) : "–"}</td>
     <td class="num" data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
-    <td class="num">${num(t.current_sl)}${t.sl_local && t.status !== "EXITED" ? ` <small class="sl-tag" title="Watched by the algo: no SL order at Zerodha">local</small>` : ""}</td><td class="num">${num(t.target)}</td>
+    <td class="num sl-tip" data-sl-tag="${t.sl_local && t.status !== "EXITED" ? "LOCAL SL (algo)" : "SL at ZERODHA"}">${num(t.current_sl)}</td><td class="num">${num(t.target)}</td>
     <td class="num ${(t.pnl || 0) >= 0 ? "pos" : "neg"}" data-trade-pnl="${t.id}">${money(t.pnl)}</td>
     <td title="${esc(t.status)}${t.exit_reason ? " · " + esc(t.exit_reason) : ""}${t.pending_exit_reason ? " → " + esc(t.pending_exit_reason) : ""}"><span class="leg-st ${st.cls}">${st.text}</span></td>
     <td class="leg-actions">${canEdit ? `<button type="button" class="edit-btn" data-leg-edit="${t.id}">Edit</button>` : ""}
@@ -1235,6 +1275,7 @@ function strategyCard(s) {
       ${canResume ? `<button type="button" class="edit-btn" data-leg-resume="${t.id}" title="${esc(t.error || "")} - put it back under the algo (SL re-placed)">Resume</button>` : ""}</td></tr>
     ${canResume ? `<tr class="add-row"><td></td><td colspan="10" class="leg-error">⚠ ${esc(t.error || "the algo stopped managing this leg")}.
       <b>No stop-loss is active.</b> Resume puts it back under the algo (SL order re-placed at ${num(t.current_sl)}), or exit it in Kite.</td></tr>` : ""}
+    ${LEG_OPEN.has(t.id) ? legFillRows(t) : ""}
     ${t.limit_exit ? `<tr class="add-row"><td></td><td class="sym">↳ Exit at limit <small>(SL protects the rest meanwhile)</small></td>
       <td class="num">${t.limit_exit.qty}</td><td></td><td class="num">${num(t.limit_exit.price)}</td><td></td><td></td><td></td><td></td>
       <td><span class="leg-st ${t.limit_exit.filled ? "part" : "wait"}">${t.limit_exit.status === "PLACING" ? "Placing…"
@@ -1728,8 +1769,71 @@ function renderConnections(d) {
   renderBrokerGate();
 }
 
+// Click the Zerodha / Breeze light: that broker's login opens in a new tab. The trader catches the redirect by itself
+// when it can (the pop-up then closes on its own); otherwise paste the redirected address - or just the token - in the
+// pop-up. Either way the token is saved and used at once, no restart.
+const LOGINS = {
+  "#conn-zerodha": {api: "/api/zerodha/login", name: "Zerodha", eg: "http://127.0.0.1:5678/…?request_token=…  (or just the request_token)"},
+  "#conn-breeze": {api: "/api/breeze/login", name: "Breeze", eg: "http://localhost:3000/?apisession=…  (or just the apisession value)"},
+};
+for (const [sel, L] of Object.entries(LOGINS)) {
+  $(sel).style.cursor = "pointer";
+  $(sel).addEventListener("click", () => brokerLogin(L));
+}
+async function brokerLogin(L) {
+  const tab = window.open("about:blank", "_blank");          // opened inside the click, so it isn't blocked
+  let r;
+  try { r = await api(L.api, {}); } catch (e) { if (tab) tab.close(); return alertBox(`${L.name} login`, [e.message]); }
+  if (tab) tab.location.href = r.url; else window.open(r.url, "_blank");
+  const pending = dialog(`${L.name} login`, `<p class="hint small" id="login-state">${r.manual
+      ? esc(r.status?.detail || "") : "Log in on the new tab: this closes by itself when the trader gets the token."}</p>
+    <label>Or paste the redirected address / token
+      <input id="login-paste" type="text" placeholder="${esc(L.eg)}" style="width:100%"></label>`);
+  okButton("Log in");
+  let done = false;
+  const poll = async () => {                                  // auto-capture: close the pop-up when it lands
+    for (let i = 0; i < 160 && !done && $("#login-paste"); i++) {
+      await new Promise((res) => setTimeout(res, 2000));
+      const st = (await api(L.api).catch(() => ({}))).status || {};
+      if (st.state === "ok" && !done) { done = true; $("#dlg").close("cancel"); $("#form-hint").textContent = `${L.name}: ${st.detail}`; refreshStrategies(); return; }
+      if (st.state === "error" && $("#login-state")) $("#login-state").textContent = st.detail;
+    }
+  };
+  if (!r.manual) poll();
+  const ok = await pending;
+  if (done || !ok) { done = true; return; }
+  done = true;
+  try {
+    const res = await api(L.api, {paste: $("#login-paste").value});
+    $("#form-hint").textContent = `${L.name}: ${res.status?.detail || "logged in"}`;
+    refreshStrategies();
+  } catch (e) { alertBox(`${L.name} login failed`, [e.message]); }
+}
+
 // Running strategies are always listed first; finished ones are history, filtered by date and paged.
 let STRATEGIES = [];
+// Expanded legs (▸ / ▾): every filled order of the leg - entries, adds, partial / SL / exits - under its combined row.
+const LEG_OPEN = new Set(), LEG_FILLS = {};
+const FILL_KIND = {ENTRY: "Entry", SL: "SL hit", EXIT: "Exit", PARTIAL: "Partial exit"};
+function legFillRows(t) {
+  const fills = (LEG_FILLS[t.id] || []).filter((o) => (o.filled_qty || 0) > 0);
+  if (!LEG_FILLS[t.id]) return `<tr class="fill-row"><td></td><td colspan="10" class="hint small">loading…</td></tr>`;
+  if (!fills.length) return `<tr class="fill-row"><td></td><td colspan="10" class="hint small">no fills yet</td></tr>`;
+  return fills.map((o) => {
+    const isEntry = o.kind === "ENTRY";
+    const label = o.purpose === "ADD" ? "Add" : o.purpose === "LIMIT_EXIT" ? "Limit exit" : FILL_KIND[o.kind] || o.kind;
+    const at = String(o.placed_at || o.created_at || "").slice(11, 19);
+    const px = num(o.avg_price ?? o.price);
+    return `<tr class="fill-row"><td></td>
+      <td class="sym">↳ <span class="fill-kind ${isEntry ? "in" : "out"}">${o.side === "BUY" ? "B" : "S"}</span> ${esc(label)} <small>${esc(at)}</small></td>
+      <td class="num">${o.filled_qty}${o.filled_qty !== o.quantity ? `<small>/${o.quantity}</small>` : ""}</td>
+      <td class="num">${isEntry ? px : ""}</td><td class="num">${isEntry ? "" : px}</td>
+      <td></td><td></td><td></td><td></td><td colspan="2"></td></tr>`;
+  }).join("");
+}
+async function loadFills(tid) {
+  try { LEG_FILLS[tid] = (await api(`/api/trades/${tid}`)).orders || []; } catch (e) { /* keep the last */ }
+}
 const STRAT_FILTER = HistoryFilter.create($("#strategies-filter"), "strategies", () => renderStrategies());
 // Period P&L next to the heading: every strategy in the selected period (all pages, not just this one) plus the
 // running ones shown on top; follows pushed P&L between dashboard refreshes.
@@ -1789,6 +1893,7 @@ async function refreshStrategies() {
   if (d.halted) h.textContent = `New trades blocked: ${d.halted}`;
   try {
     STRATEGIES = (await api("/api/strategies")).strategies;
+    await Promise.all([...LEG_OPEN].map(loadFills));          // expanded legs: their fills, fresh
     renderStrategies();
   } catch (e) { /* keep the last render */ }
 }
@@ -1819,6 +1924,14 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   if (mid) return legToMarket(Number(mid));
   const cid = ev.target.dataset.legCancel;
   if (cid) return cancelLeg(Number(cid));
+  const tog = ev.target.closest?.("[data-leg-toggle]");
+  if (tog) {
+    const id = Number(tog.dataset.legToggle);
+    if (LEG_OPEN.has(id)) LEG_OPEN.delete(id); else LEG_OPEN.add(id);
+    renderStrategies();
+    if (LEG_OPEN.has(id)) { await loadFills(id); renderStrategies(); }
+    return;
+  }
   const resId = ev.target.dataset.legResume;
   if (resId) return resumeLeg(Number(resId));
   const eid = ev.target.dataset.legEdit;

@@ -520,3 +520,17 @@ table.order-confirm td:last-child button + button { margin-left: 4px; }
 /* a leg the algo stopped managing (ERROR): why, and what Resume does */
 .legs-live td.leg-error { color: var(--sell); font-size: 12px; white-space: normal; padding-top: 2px; }
 .resume-err { color: var(--sell); font-weight: 600; }
+/* local (algo-watched) SL: the number itself is marked - accent colour + dotted underline, no extra width */
+.sl-local { color: var(--accent); border-bottom: 1px dashed var(--accent); cursor: help; }
+/* SL cell: the LOCAL / ZERODHA tag floats above the number on hover (instant, takes no space in the row) */
+.legs-live td.sl-tip { position: relative; cursor: default; }
+.legs-live td.sl-tip:hover::after { content: attr(data-sl-tag); position: absolute; right: 4px; bottom: calc(100% - 4px); z-index: 5;
+  font-size: 10px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; padding: 2px 6px; border-radius: 4px;
+  color: var(--accent); background: var(--card); border: 1px solid var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+/* expand a leg: every entry / exit fill under its combined row */
+.leg-tog { background: none; border: none; color: var(--fg); cursor: pointer; padding: 0 6px 0 0; font-size: 15px; line-height: 1; width: 18px; }
+.leg-tog:hover { color: var(--fg); }
+.legs-live tr.fill-row td { font-size: 12px; color: var(--muted); padding-top: 3px; padding-bottom: 3px; border-top: none; }
+.legs-live tr.fill-row td.num { color: var(--fg); }
+.fill-kind { display: inline-block; width: 16px; text-align: center; font-weight: 700; border-radius: 3px; font-size: 10px; }
+.fill-kind.in { color: var(--buy); } .fill-kind.out { color: var(--sell); }

@@ -36,6 +36,8 @@ class App:
     stream: object = None          # marketdata.KiteStream (MARKET_DATA_PROVIDER=KITE), else None
     hub: object = None             # trader.stream.TickHub: pushes ticks / dashboard changes to the pages
     telegram: object = None        # telegram_signals.feed.SignalFeed: the tips channel (read-only), /telegram page
+    zerodha_login: object = None   # trader.zerodha_login.ZerodhaLogin: daily Kite login from the page, no restart
+    breeze_login: object = None    # trader.breeze_login.BreezeLogin: daily ICICI Breeze login from the page
 
 
 def single_instance_lock(db_path: Path):
@@ -122,6 +124,39 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist, mcfg=None) -> App
     svc.extra_tick = strategies.tick        # combined-P&L rules run right after the per-trade engine, every tick
     from .stream import TickHub
     app = App(cfg, svc, repo, paper, quotes, lock, strategies, stream, TickHub(svc, quotes))
+    if zcfg.api_key and zcfg.api_secret:
+        from .zerodha_login import ZerodhaLogin
+
+        def use_token(token: str) -> None:
+            # the running trader picks the new session up now: the order client (LIVE) and the price stream
+            if live_kite is not None:
+                live_kite.set_access_token(token)
+            if stream is not None:
+                try:
+                    stream.check()                 # sees the new token in the token file and reconnects
+                except Exception:                  # noqa: BLE001 - its watchdog retries anyway
+                    log.exception("price stream did not take the new token yet")
+            svc.audit(None, "ZERODHA_LOGIN", "INFO", {"via": "web page"})
+        app.zerodha_login = ZerodhaLogin(zcfg, use_token)
+    try:
+        from trading_data.config import load_settings
+        bs = load_settings()
+        if bs.credentials.api_key:
+            import os
+
+            from .breeze_login import BreezeLogin
+            from .config import load_env
+
+            def use_breeze(token: str) -> None:
+                # Breeze price clients reconnect with the new session on their next call
+                for q in (quotes, getattr(quotes, "fallback", None)):
+                    if isinstance(q, BreezeQuotes):
+                        q._client = None
+                svc.audit(None, "BREEZE_LOGIN", "INFO", {"via": "web page"})
+            redirect = os.environ.get("BREEZE_REDIRECT_URL") or load_env().get("BREEZE_REDIRECT_URL", "")
+            app.breeze_login = BreezeLogin(bs.credentials.api_key, bs.paths.session_file, use_breeze, redirect.strip())
+    except Exception as exc:               # noqa: BLE001 - no Breeze set up: the light just explains it
+        log.info("breeze web login unavailable: %s", exc)
     try:                                   # the Telegram feed is optional and never blocks the trader from starting
         from telegram_signals.config import TelegramConfig
         from telegram_signals.feed import SignalFeed
