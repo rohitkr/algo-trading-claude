@@ -262,6 +262,8 @@ class TraderConfig:
             allow_add_to_symbol=_bool(g("TRADER_ALLOW_ADD_TO_SYMBOL", "true")),
             fast_poll_seconds=float(g("TRADER_FAST_POLL_SECONDS", d.fast_poll_seconds)),
             sl_local_default=_sl_mode(g("TRADER_SL_MODE", "ZERODHA")),
+            nse_market_hours=(_opt_time(g("TRADER_MARKET_OPEN", "09:15")), _opt_time(g("TRADER_MARKET_CLOSE", "15:30"))),
+            mcx_market_hours=(_opt_time(g("TRADER_MCX_MARKET_OPEN", "09:00")), _opt_time(g("TRADER_MCX_MARKET_CLOSE", "23:30"))),
             market_hours_guard=_bool(g("TRADER_MARKET_HOURS_GUARD",
                                        "true" if g("TRADER_MODE", "PAPER").strip().strip("'\"").upper() == "LIVE" else "false")),
             local_sl_poll_seconds=float(g("TRADER_LOCAL_SL_POLL_SECONDS", d.local_sl_poll_seconds)),

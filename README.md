@@ -350,7 +350,30 @@ idempotent orders and manual-exit detection. PAPER is the default. See [`trader/
 
 ```bash
 python3 -m trader serve            # PAPER
+./start.sh                         # LIVE (trader serve --live)
 ```
+
+**Daily login:** click the red **Zerodha** / **Breeze** light in the page header. The broker's login opens in a new
+tab; the trader catches the redirect itself (Kite: `KITE_REDIRECT_URL`; Breeze: `BREEZE_REDIRECT_URL`, default
+`http://localhost:3000/`), or you paste the redirected address / the bare token into the pop-up. The token is saved
+and used at once, no restart. `./login.sh` still works. LIVE starts even when logged out (nothing is sent until you
+log in).
+
+Settings (`.env`, see `.env.example`; restart after changing):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TRADER_MARKET_HOURS_GUARD` | `true` in LIVE | No automatic exit / SL change while the exchange is closed; manual exits are refused then |
+| `TRADER_MARKET_OPEN` / `TRADER_MARKET_CLOSE` | `09:15` / `15:30` | NSE / BSE hours for that check (weekends always closed) |
+| `TRADER_MCX_MARKET_OPEN` / `TRADER_MCX_MARKET_CLOSE` | `09:00` / `23:30` | MCX hours |
+| `TRADER_SL_MODE` | `ZERODHA` | Default for new strategies: `ZERODHA` = SL order at Zerodha, `LOCAL` = the algo watches SL/target and exits at market |
+| `TRADER_LOCAL_SL_POLL_SECONDS` | `1` | Check cadence while a local-SL leg is open |
+| `TRADER_STOP_GRACE_SECONDS` | `10` | Local SL with no live price this long → falls back to a Zerodha SL order |
+| `TRADER_FAST_POLL_SECONDS` | `0.7` | Check cadence while an exit is in progress |
+| `TRADER_ALLOW_ADD_TO_SYMBOL` | `true` | Allow a second same-side trade in a symbol already held |
+| `TRADER_HOSTNAMES` | `algo.local` | Extra host names the web UI answers to |
+| `BREEZE_REDIRECT_URL` | `http://localhost:3000/` | Breeze app's redirect URL (ICICI API portal), for the web login |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_CHANNEL` | – | Telegram signals feed (`/telegram`); blank = off |
 
 ## DuckDB
 
