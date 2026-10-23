@@ -93,6 +93,14 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path == "/api/zerodha/login":
                     zl = app.zerodha_login
                     return self._json(200, {"available": zl is not None, "status": zl.status if zl else None})
+                m = re.fullmatch(r"/api/trades/(\d+)/chart", u.path)
+                if m:                                       # Kite call, read-only: outside the trading lock
+                    rs = svc.reader()
+                    try:
+                        return self._json(200, rs.chart(int(m.group(1))))
+                    finally:
+                        if rs.repo is not svc.repo:
+                            rs.repo.close()
                 if u.path in ("/api/dashboard", "/api/strategies", "/api/events") or re.fullmatch(
                         r"/api/(strategies|trades)/\d+", u.path):
                     return self._read_view(u.path)          # never waits for the trading lock

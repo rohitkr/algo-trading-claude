@@ -535,3 +535,29 @@ table.order-confirm td:last-child button + button { margin-left: 4px; }
 .fill-kind { display: inline-block; width: 16px; text-align: center; font-weight: 700; border-radius: 3px; font-size: 10px; }
 .fill-kind.in { color: var(--buy); } .fill-kind.out { color: var(--sell); }
 .order-confirm .no-sl { color: var(--sell); font-weight: 600; font-size: 10px; margin-left: 4px; }
+/* leg price chart pop-up (click a contract name) */
+.legs-live td.chart-link { cursor: pointer; }
+.legs-live td.chart-link:hover { color: var(--accent); text-decoration: underline dotted; }
+dialog.wide-dlg { max-width: 860px; }
+.chart-box { position: relative; min-width: min(780px, 86vw); }
+.ch-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.ch-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-bottom: 8px; }
+.ch-stat { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); }
+.ch-stat b { font-size: 14px; color: var(--fg); font-variant-numeric: tabular-nums; }
+.ch-stat b.pos { color: var(--buy); } .ch-stat b.neg { color: var(--sell); }
+.ch-svg { width: 100%; height: 300px; display: block; background: var(--card2); border-radius: 8px; }
+.ch-grid { stroke: var(--line); stroke-width: 1; } .ch-grid.day { stroke-dasharray: 3 3; stroke-width: 1.5; }
+.ch-axis { fill: var(--muted); font-size: 10px; }
+.ch-line { fill: none; stroke: var(--accent); stroke-width: 1.6; } .ch-area { fill: var(--accent); opacity: .08; }
+.ch-lv { stroke-width: 1.2; stroke-dasharray: 5 4; }
+.ch-tagt { fill: #fff; font-size: 10px; font-weight: 700; }
+.lv-entry { stroke: #6f8cff; fill: #6f8cff; color: #6f8cff; } .lv-sl { stroke: var(--sell); fill: var(--sell); color: var(--sell); }
+.lv-tp { stroke: var(--buy); fill: var(--buy); color: var(--buy); } .lv-ltp { stroke: #e0a800; fill: #e0a800; color: #e0a800; }
+.ch-entry { fill: #6f8cff; stroke: #fff; stroke-width: 1.5; }
+.ch-cross { stroke: var(--muted); stroke-width: 1; } .ch-dot { fill: var(--accent); stroke: #fff; stroke-width: 1; }
+.ch-tip { position: absolute; top: 74px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
+  font-size: 12px; pointer-events: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+.ch-svg { height: 320px; user-select: none; cursor: crosshair; }
+.ch-lv.drag { stroke-width: 1.8; } .ch-lv.dragging { stroke-dasharray: none; stroke-width: 2.4; }
+.ch-grab { stroke: transparent; stroke-width: 12; cursor: ns-resize; }
+.ch-msg { font-size: 12px; color: var(--accent); margin-left: 8px; }

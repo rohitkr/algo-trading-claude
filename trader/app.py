@@ -120,6 +120,11 @@ def build(cfg: TraderConfig, *, cli_live: bool, clock=now_ist, mcfg=None) -> App
             # Kite basket margins for a strategy before it is placed (hedge benefit included; display only)
             return rest_kite().basket_order_margins(orders, consider_positions=False)
         svc.margin_fn = margin
+
+        def candles(token: int, start, end):
+            # Kite minute candles for one contract (the leg's price chart); display only
+            return rest_kite().historical_data(token, start, end, "minute")
+        svc.candles_fn = candles
     strategies = StrategyService(svc, repo)
     svc.extra_tick = strategies.tick        # combined-P&L rules run right after the per-trade engine, every tick
     from .stream import TickHub

@@ -237,3 +237,23 @@ def test_page_reads_never_wait_for_the_trading_lock(web):
     finally:
         release.set()
         th.join(2)
+
+
+def test_leg_chart_returns_minute_prices_and_levels(web):
+    from datetime import datetime as dt
+    r, base = web
+    r.price(100)
+    tid = r.open_trade()
+    r.tick()
+    calls = []
+
+    def candles(token, start, end):
+        calls.append((token, start, end))
+        return [{"date": dt(2026, 9, 28, 9, 15), "open": 98, "high": 101, "low": 97, "close": 100},
+                {"date": dt(2026, 9, 28, 9, 16), "open": 100, "high": 104, "low": 99, "close": 103}]
+    assert call(base, f"/api/trades/{tid}/chart")[0] == 400         # no Kite: explained, not a crash
+    r.svc.candles_fn = candles
+    code, d = call(base, f"/api/trades/{tid}/chart")
+    assert code == 200 and d["candles"][1] == ["2026-09-28T09:16", 100, 104, 99, 103]
+    assert d["entry"] == 100 and d["sl"] == 90 and d["target"] == 130 and d["side"] == "BUY"
+    assert calls[0][1].hour == 9 and calls[0][0] == r.svc.instruments.by_symbol("NFO", SYM).instrument_token

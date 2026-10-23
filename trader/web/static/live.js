@@ -12,7 +12,7 @@
 window.Live = (() => {
   const fmtNum = (v) => (v == null ? "–" : Number(v).toLocaleString("en-IN", {maximumFractionDigits: 2}));
   const fmtMoney = (v) => (v == null ? "–" : "₹" + fmtNum(v));
-  const dash = [], statusFns = [], priceFns = [], strategyFns = [];
+  const dash = [], statusFns = [], priceFns = [], strategyFns = [], tradeFns = [];
   let client = null, keys = [], streaming = false, frame = 0, dashTimer = 0, lastStatus = null;
   let pending = {prices: {}, trades: {}, strategies: {}};
 
@@ -35,6 +35,7 @@ window.Live = (() => {
       each(`[data-trade-ltp="${id}"]`, (el) => setText(el, fmtNum(t.ltp)));
       each(`[data-trade-pnl="${id}"]`, (el) => { setText(el, fmtMoney(t.pnl)); setSign(el, t.pnl); });
       each(`[data-trade-pnlpct="${id}"]`, (el) => { setText(el, t.pnl_pct == null ? "–" : t.pnl_pct + "%"); setSign(el, t.pnl); });
+      tradeFns.forEach((fn) => fn(Number(id), t));
     }
     for (const [id, v] of Object.entries(p.strategies)) {
       each(`[data-strategy-pnl="${id}"]`, (el) => { setText(el, fmtMoney(v)); setSign(el, v); });
@@ -90,8 +91,9 @@ window.Live = (() => {
     },
     onDashboard(fn) { dash.push(fn); },
     onStatus(fn) { statusFns.push(fn); if (lastStatus) fn(lastStatus); },
-    onPrice(fn) { priceFns.push(fn); },
-    onStrategy(fn) { strategyFns.push(fn); },     // fn(strategyId, pnl) for every pushed strategy P&L          // fn(key, price) for every pushed price
+    onPrice(fn) { priceFns.push(fn); },           // fn(key, price) for every pushed price
+    onStrategy(fn) { strategyFns.push(fn); },     // fn(strategyId, pnl) for every pushed strategy P&L
+    onTrade(fn) { tradeFns.push(fn); },           // fn(tradeId, {ltp, pnl, pnl_pct}) for every pushed trade tick
     // After a page re-renders rows from /api/dashboard (whose prices are the last monitor tick's), put the
     // newer pushed values back so a cell never steps backwards.
     reapply() { merge(known); },

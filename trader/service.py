@@ -1659,6 +1659,34 @@ class TradeService:
                     self._mark_kite_ltp(t, snap)
             return self.trade_view(trade_id)
 
+    candles_fn = None                     # (instrument_token, from, to) -> Kite minute candles; set by the app
+
+    def chart(self, trade_id: int) -> dict:
+        """A leg's option price, minute by minute, from the session of its entry (BTST: from that day, up to 3 days)
+        to now, with its entry / SL / target - for the chart pop-up. Read-only; no trading lock."""
+        t = self.repo.trade(trade_id)
+        if t is None:
+            raise ActionError(f"no trade {trade_id}")
+        if self.candles_fn is None:
+            raise ActionError("no chart data: needs Kite (KITE_API_KEY) and today's Zerodha login")
+        inst = self.instruments.by_symbol(t["exchange"], t["tradingsymbol"])
+        now = self.clock()
+        since = t["entry_time"] or t["created_at"] or now.isoformat()
+        day0 = max(datetime.fromisoformat(since[:10]).date(), (now - timedelta(days=4)).date())
+        start = datetime.combine(day0, datetime.min.time()).replace(hour=9)
+        try:
+            rows = self.candles_fn(inst.instrument_token, start, now) or []
+        except Exception as exc:                      # noqa: BLE001 - shown in the pop-up
+            raise ActionError(f"Kite chart data: {type(exc).__name__}: {exc}") from None
+        candles = [[(c["date"].isoformat() if hasattr(c["date"], "isoformat") else str(c["date"]))[:16],
+                    c["open"], c["high"], c["low"], c["close"]] for c in rows]
+        return {"id": t["id"], "side": t["side"], "tradingsymbol": t["tradingsymbol"], "candles": candles,
+                "entry": t["entry_avg_price"] or t["entry_price"], "entry_time": t["entry_time"],
+                "sl": t["current_sl"], "target": t["target"], "ltp": t["kite_ltp"] or t["last_ltp"],
+                "exit": t["exit_avg_price"], "exit_time": t["exit_time"], "tick": t["tick_size"],
+                "editable": t["status"] in (L.POSITION_ACTIVE, L.ENTRY_EXECUTED, L.ENTRY_ORDER_PLACED, L.ENTRY_PENDING)
+                            and not t["pending_exit_reason"]}
+
     def reader(self) -> "TradeService":
         """This service for page reads only: its own read-only database connection and its own lock, so a read
         never waits for a running tick. Close with reader.repo.close(). Never use it to act."""

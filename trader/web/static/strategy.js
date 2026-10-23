@@ -877,6 +877,13 @@ function collectConfig() {
 // ---------------------------------------------------------------- dialogs
 // Cancel is a plain button (not a submit), so Enter in any box submits = the OK button, never Cancel.
 $("#dlg-cancel").addEventListener("click", () => $("#dlg").close("cancel"));
+// Click outside a pop-up (on the dimmed backdrop) closes it = Cancel. Only when the press also started outside, so a
+// drag inside (e.g. moving the chart's SL line) that ends outside never closes it.
+let dlgDownOutside = false;
+const outsideDlg = (e) => { const r = $("#dlg").getBoundingClientRect();
+  return e.target === $("#dlg") && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom); };
+$("#dlg").addEventListener("mousedown", (e) => { dlgDownOutside = outsideDlg(e); });
+$("#dlg").addEventListener("click", (e) => { if (dlgDownOutside && outsideDlg(e)) $("#dlg").close("cancel"); dlgDownOutside = false; });
 function dialog(title, html, live = false) {
   const d = $("#dlg");
   $("#dlg-title").textContent = title;
@@ -1258,7 +1265,7 @@ function strategyCard(s) {
     const hasFills = (t.filled_qty || 0) > 0;
     return `<tr><td>${hasFills ? `<button type="button" class="leg-tog" data-leg-toggle="${t.id}" aria-expanded="${LEG_OPEN.has(t.id)}"
       title="${LEG_OPEN.has(t.id) ? "Hide" : "Show"} every entry / exit of this leg">${LEG_OPEN.has(t.id) ? "▾" : "▸"}</button>` : ""}<span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span></td>
-    <td class="sym" title="${esc(t.tradingsymbol)}">${contractName(t)}</td><td class="num">${qtyText}</td>
+    <td class="sym chart-link" data-chart="${t.id}" title="${esc(t.tradingsymbol)} · click for the price chart">${contractName(t)}</td><td class="num">${qtyText}</td>
     <td class="num">${num(t.entry_avg_price ?? t.entry_price)}</td>
     <td class="num">${t.exit_avg_price != null ? num(t.exit_avg_price) : "–"}</td>
     <td class="num" data-ltp-cell="${t.id}" data-trade-ltp="${t.id}">${num(t.kite_ltp ?? t.last_ltp)}</td>
@@ -1539,6 +1546,189 @@ async function resumeLeg(tid, prefill = null, err = "") {
                                              target: vals.tp === "" ? null : Number(vals.tp)});
     refreshStrategies();
   } catch (e) { return resumeLeg(tid, vals, e.message); }      // back to the pop-up, values kept
+}
+
+// ---------------------------------------------------------------- leg price chart (click a contract name)
+// Minute prices of the option since the leg's entry session with your entry / SL / target / LTP. Interactive: wheel =
+// zoom (around the cursor), drag = pan, double-click = reset; drag the SL or Target line to change it (saved as an
+// ordinary leg edit when you let go). Refreshes every 10 s (keeps your zoom).
+const CH = {w: 760, h: 320, l: 8, r: 66, t: 10, b: 24};
+let CHART_ST = null;
+// Real time: every pushed tick of the charted leg moves its last minute candle (or starts the next minute's).
+Live.onTrade((id, t) => {
+  const st = CHART_ST;
+  if (!st || st.tid !== id || !st.d || t.ltp == null || !$("#ch-svg")) return;
+  const c = st.d.candles, now = new Date(), p = Number(t.ltp);
+  const pad = (n) => String(n).padStart(2, "0");
+  const minute = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const last = c[c.length - 1];
+  const following = st.x1 >= c.length - 1;
+  if (last && last[0] === minute) { last[2] = Math.max(last[2], p); last[3] = Math.min(last[3], p); last[4] = p; }
+  else if (!last || last[0] < minute) {
+    c.push([minute, p, p, p, p]);
+    if (following) { const span = st.x1 - st.x0; st.x1 = c.length - 1; st.x0 = Math.max(0, st.x1 - span); }
+  }
+  st.d.ltp = p;
+  if (!st.busy) renderChart(st);
+});
+async function openChart(tid) {
+  const pending = dialog("Price chart", `<div id="chart-box" class="chart-box"><p class="hint small">loading…</p></div>`);
+  $("#dlg").classList.add("wide-dlg");
+  okButton("Close");
+  $("#dlg-cancel").classList.add("hidden");
+  const st = {tid, d: null, x0: 0, x1: 0, drag: null, busy: false, msg: ""};
+  CHART_ST = st;
+  const load = async (first) => {
+    if (!$("#chart-box") || st.drag || st.busy) return;
+    try {
+      const d = await api(`/api/trades/${tid}/chart`);
+      const n = d.candles.length;
+      const atEnd = !st.d || st.x1 >= st.d.candles.length - 1;
+      if (first || !st.d) { st.x0 = 0; st.x1 = Math.max(0, n - 1); }
+      else if (atEnd) { const span = st.x1 - st.x0; st.x1 = n - 1; st.x0 = Math.max(0, st.x1 - span); }   // follow live
+      st.d = d;
+      if (first) chartShell(st);
+      renderChart(st);
+    } catch (e) { if ($("#chart-box")) $("#chart-box").innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
+  };
+  await load(true);
+  const timer = setInterval(() => { if (!$("#chart-box")) return clearInterval(timer); load(false); }, 10000);
+  await pending;
+  clearInterval(timer);
+  CHART_ST = null;
+  $("#dlg").classList.remove("wide-dlg");
+  $("#dlg-cancel").classList.remove("hidden");
+}
+function chartShell(st) {
+  $("#chart-box").innerHTML = `<div id="ch-top"></div>
+    <svg id="ch-svg" class="ch-svg" viewBox="0 0 ${CH.w} ${CH.h}" preserveAspectRatio="none" role="img" aria-label="Price chart"></svg>
+    <div id="ch-tip" class="ch-tip hidden"></div>
+    <p class="hint small" id="ch-foot"></p>`;
+  const svg = $("#ch-svg");
+  const pt = (e) => { const r = svg.getBoundingClientRect(); return {x: ((e.clientX - r.left) / r.width) * CH.w, y: ((e.clientY - r.top) / r.height) * CH.h}; };
+  svg.addEventListener("wheel", (e) => {                     // zoom around the cursor
+    e.preventDefault();
+    const n = st.d.candles.length; if (n < 3) return;
+    const {x} = pt(e), W = CH.w - CH.l - CH.r;
+    // smooth: the zoom follows how far you scroll (trackpads send many small steps, a mouse wheel few big ones)
+    const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    const k = Math.exp(Math.max(-0.25, Math.min(0.25, dy * 0.0015)));
+    const f = Math.min(1, Math.max(0, (x - CH.l) / W)), span = st.zx1 - st.zx0;
+    const ns = Math.max(10, Math.min(n - 1, span * k));
+    const at = st.zx0 + f * span;
+    st.zx0 = Math.max(0, at - f * ns); st.zx1 = Math.min(n - 1, st.zx0 + ns); st.zx0 = Math.max(0, st.zx1 - ns);
+    st.x0 = Math.round(st.zx0); st.x1 = Math.round(st.zx1);
+    if (!st.zoomFrame) st.zoomFrame = requestAnimationFrame(() => { st.zoomFrame = 0; renderChart(st); });
+  }, {passive: false});
+  svg.addEventListener("dblclick", () => { st.x0 = 0; st.x1 = st.d.candles.length - 1; renderChart(st); });
+  svg.addEventListener("mousedown", (e) => {
+    const p = pt(e), g = st.geo; if (!g) return;
+    for (const k of ["sl", "target"]) {                       // grab a level line (within ~7 px)
+      if (st.d.editable && st.d[k] != null && Math.abs(g.Y(st.d[k]) - p.y) < 7 * (CH.h / svg.getBoundingClientRect().height)) {
+        st.drag = {kind: k, price: st.d[k]}; e.preventDefault(); return;
+      }
+    }
+    st.drag = {kind: "pan", x: p.x, x0: st.x0, x1: st.x1}; e.preventDefault();
+  });
+  const move = (e) => {
+    const p = pt(e), g = st.geo; if (!g) return;
+    if (st.drag?.kind === "pan") {
+      const W = CH.w - CH.l - CH.r, per = (st.drag.x1 - st.drag.x0) / W, n = st.d.candles.length;
+      let sh = Math.round((st.drag.x - p.x) * per);
+      sh = Math.max(-st.drag.x0, Math.min(n - 1 - st.drag.x1, sh));
+      st.x0 = st.drag.x0 + sh; st.x1 = st.drag.x1 + sh; renderChart(st); return;
+    }
+    if (st.drag) { st.drag.price = toTick(g.P(p.y), g.tick); renderChart(st); return; }
+    hoverChart(st, p, svg);
+  };
+  svg.addEventListener("mousemove", move);
+  window.addEventListener("mousemove", (e) => { if (st.drag && $("#ch-svg")) move(e); });
+  const up = async () => {
+    const dr = st.drag; st.drag = null;
+    if (!dr || dr.kind === "pan" || !$("#ch-svg")) return;
+    if (dr.price === st.d[dr.kind]) return renderChart(st);
+    st.busy = true; st.msg = `Saving ${dr.kind === "sl" ? "SL" : "target"} ${num(dr.price)}…`; renderChart(st, dr);
+    try {
+      const p = await api(`/api/trades/${st.tid}/edit/prepare`, {changes: {[dr.kind === "sl" ? "stop_loss" : "target"]: dr.price}});
+      if (!p.ok) throw new Error((p.errors || ["not allowed"]).join("; "));
+      await api(`/api/trades/${st.tid}/edit/apply`, {token: p.token});
+      st.d[dr.kind] = dr.price; st.msg = `${dr.kind === "sl" ? "SL" : "Target"} moved to ${num(dr.price)}`;
+      refreshStrategies();
+    } catch (e) { st.msg = `Not changed: ${e.message}`; }
+    st.busy = false; renderChart(st);
+  };
+  svg.addEventListener("mouseup", up);
+  window.addEventListener("mouseup", () => { if (st.drag && $("#ch-svg")) up(); });
+  svg.addEventListener("mouseleave", () => { if (!st.drag) ["#ch-x", "#ch-dot", "#ch-tip"].forEach((q) => $(q)?.classList.add("hidden")); });
+}
+function renderChart(st, pendingDrag) {
+  if (st.zx0 == null || Math.round(st.zx0) !== st.x0 || Math.round(st.zx1) !== st.x1) { st.zx0 = st.x0; st.zx1 = st.x1; }
+  const d = st.d, all = d.candles, svg = $("#ch-svg");
+  if (!svg) return;
+  if (!all.length) { $("#chart-box").innerHTML = `<p class="hint">No price data yet for ${esc(d.tradingsymbol)}.</p>`; return; }
+  const c = all.slice(st.x0, st.x1 + 1), ltp = d.ltp ?? all[all.length - 1][4];
+  const dr = st.drag?.kind && st.drag.kind !== "pan" ? st.drag : pendingDrag;
+  const lvl = {entry: d.entry, sl: dr?.kind === "sl" ? dr.price : d.sl, target: dr?.kind === "target" ? dr.price : d.target};
+  const levels = [["Entry", lvl.entry, "lv-entry", ""], ["SL", lvl.sl, "lv-sl", "sl"], ["Target", lvl.target, "lv-tp", "target"], ["LTP", ltp, "lv-ltp", ""]]
+    .filter(([, v]) => v != null);
+  let lo = Math.min(...c.map((x) => x[3]), ...levels.map(([, v]) => v)), hi = Math.max(...c.map((x) => x[2]), ...levels.map(([, v]) => v));
+  const pad = (hi - lo) * 0.06 || 1; lo -= pad; hi += pad;
+  const W = CH.w - CH.l - CH.r, H = CH.h - CH.t - CH.b;
+  const X = (i) => CH.l + (c.length > 1 ? (i / (c.length - 1)) * W : W / 2);
+  const Y = (p) => CH.t + (1 - (p - lo) / (hi - lo)) * H;
+  const P = (y) => lo + (1 - (y - CH.t) / H) * (hi - lo);
+  st.geo = {X, Y, P, c, tick: d.tick || 0.05};
+  const path = c.map((x, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(x[4]).toFixed(1)}`).join("");
+  const area = `${path}L${X(c.length - 1).toFixed(1)},${CH.t + H}L${X(0).toFixed(1)},${CH.t + H}Z`;
+  const ticks = [], every = c.length > 300 ? 60 : c.length > 120 ? 30 : 15;
+  c.forEach((x, i) => { const hm = x[0].slice(11, 16), day = x[0].slice(0, 10);
+    if (i === 0 || day !== c[i - 1][0].slice(0, 10)) ticks.push([i, `${day.slice(8, 10)}/${day.slice(5, 7)}`, true]);
+    else if (Number(hm.slice(3)) % every === 0 && i > 8) ticks.push([i, hm, false]); });
+  const eT = d.entry_time ? d.entry_time.slice(0, 16) : null;
+  const entryIdx = eT ? c.findIndex((x) => x[0] >= eT) : -1;
+  svg.innerHTML = `
+    ${[0, 0.25, 0.5, 0.75, 1].map((f) => { const p = lo + (hi - lo) * f; return `<line class="ch-grid" x1="${CH.l}" x2="${CH.l + W}" y1="${Y(p)}" y2="${Y(p)}"/>
+      <text class="ch-axis" x="${CH.l + W + 4}" y="${Y(p) + 3}">${num(Math.round(p * 20) / 20)}</text>`; }).join("")}
+    ${ticks.map(([i, lab, day]) => `<line class="ch-grid${day ? " day" : ""}" x1="${X(i)}" x2="${X(i)}" y1="${CH.t}" y2="${CH.t + H}"/>
+      <text class="ch-axis" x="${X(i) + 2}" y="${CH.h - 8}">${lab}</text>`).join("")}
+    <path class="ch-area" d="${area}"/><path class="ch-line" d="${path}"/>
+    ${levels.map(([n, v, cls, k]) => `<line class="ch-lv ${cls}${k ? " drag" : ""}${dr?.kind === k && k ? " dragging" : ""}" x1="${CH.l}" x2="${CH.l + W}" y1="${Y(v)}" y2="${Y(v)}"/>
+      ${k ? `<line class="ch-grab" x1="${CH.l}" x2="${CH.l + W}" y1="${Y(v)}" y2="${Y(v)}"/>` : ""}
+      <rect class="ch-tag ${cls}" x="${CH.l + W + 1}" y="${Y(v) - 8}" width="${CH.r - 2}" height="16" rx="3"/>
+      <text class="ch-tagt" x="${CH.l + W + 5}" y="${Y(v) + 4}">${n === "LTP" ? "" : n[0] + " "}${num(v)}</text>`).join("")}
+    ${entryIdx >= 0 && d.entry != null ? `<circle class="ch-entry" cx="${X(entryIdx)}" cy="${Y(d.entry)}" r="4"/>` : ""}
+    <line id="ch-x" class="ch-cross hidden" y1="${CH.t}" y2="${CH.t + H}"/><circle id="ch-dot" class="ch-dot hidden" r="3.5"/>`;
+  // header stats
+  const buy = d.side === "BUY", moved = d.entry != null ? ltp - d.entry : null;
+  const today = all.filter((x) => x[0].slice(0, 10) === all[all.length - 1][0].slice(0, 10));
+  const open = today[0][1], dHi = Math.max(...today.map((x) => x[2])), dLo = Math.min(...today.map((x) => x[3]));
+  const sgn = (v) => (v > 0 ? "+" : "") + num(Math.round(v * 100) / 100);
+  const good = (v) => ((buy ? v : -v) >= 0 ? "pos" : "neg");
+  const stat = (k, v, cls = "") => `<div class="ch-stat"><span>${k}</span><b class="${cls}">${v}</b></div>`;
+  $("#ch-top").innerHTML = `<div class="ch-head"><b>${esc(d.tradingsymbol)}</b> <span class="leg-st ${buy ? "run" : "warn"}">${d.side}</span>
+      ${st.msg ? `<span class="ch-msg">${esc(st.msg)}</span>` : ""}</div>
+    <div class="ch-stats">${stat("LTP", num(ltp))}
+      ${moved != null ? stat("Since entry", `${sgn(moved)} (${sgn(moved / d.entry * 100)}%)`, good(moved)) : ""}
+      ${stat("Since open", `${sgn(ltp - open)} (${sgn((ltp - open) / open * 100)}%)`)}
+      ${stat("Day high / low", `${num(dHi)} / ${num(dLo)}`)}
+      ${lvl.sl != null ? stat("To SL", sgn(lvl.sl - ltp)) : stat("SL", "none")}
+      ${lvl.target != null ? stat("To target", sgn(lvl.target - ltp)) : ""}</div>`;
+  $("#ch-foot").innerHTML = `Wheel = zoom · drag = pan · double-click = reset · drag the <span class="lv-sl">SL</span> / <span class="lv-tp">target</span> line to change it · live ticks · 1-min history from Kite`;
+}
+function hoverChart(st, p, svg) {
+  const g = st.geo; if (!g) return;
+  const c = g.c, W = CH.w - CH.l - CH.r;
+  const i = Math.max(0, Math.min(c.length - 1, Math.round(((p.x - CH.l) / W) * (c.length - 1))));
+  const px = g.X(i), k = c[i], d = st.d;
+  const near = ["sl", "target"].some((q) => d[q] != null && Math.abs(g.Y(d[q]) - p.y) < 7 * (CH.h / svg.getBoundingClientRect().height));
+  svg.style.cursor = near ? "ns-resize" : "crosshair";
+  $("#ch-x").setAttribute("x1", px); $("#ch-x").setAttribute("x2", px); $("#ch-x").classList.remove("hidden");
+  $("#ch-dot").setAttribute("cx", px); $("#ch-dot").setAttribute("cy", g.Y(k[4])); $("#ch-dot").classList.remove("hidden");
+  const tip = $("#ch-tip"), vs = d.entry != null ? ` · vs entry ${(k[4] - d.entry > 0 ? "+" : "") + num(Math.round((k[4] - d.entry) * 100) / 100)}` : "";
+  tip.textContent = `${k[0].slice(8, 10)}/${k[0].slice(5, 7)} ${k[0].slice(11, 16)} · ${num(k[4])} (H ${num(k[2])} L ${num(k[3])})${vs}`;
+  tip.classList.remove("hidden");
+  const r = svg.getBoundingClientRect();
+  tip.style.left = `${Math.min(r.width - 280, Math.max(0, (px / CH.w) * r.width - 130))}px`;
 }
 
 // Move a strategy's stop-losses between Zerodha (a resting SL order) and local (watched by the algo).
@@ -1932,6 +2122,8 @@ $("#strategies-list").addEventListener("click", async (ev) => {
     if (LEG_OPEN.has(id)) { await loadFills(id); renderStrategies(); }
     return;
   }
+  const ch = ev.target.closest?.("[data-chart]");
+  if (ch) return openChart(Number(ch.dataset.chart));
   const resId = ev.target.dataset.legResume;
   if (resId) return resumeLeg(Number(resId));
   const eid = ev.target.dataset.legEdit;
