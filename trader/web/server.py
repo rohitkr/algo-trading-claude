@@ -93,8 +93,9 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                 if u.path == "/api/zerodha/login":
                     zl = app.zerodha_login
                     return self._json(200, {"available": zl is not None, "status": zl.status if zl else None})
-                if u.path == "/api/dashboard":
-                    return self._json(200, svc.dashboard())
+                if u.path in ("/api/dashboard", "/api/strategies", "/api/events") or re.fullmatch(
+                        r"/api/(strategies|trades)/\d+", u.path):
+                    return self._read_view(u.path)          # never waits for the trading lock
                 if u.path == "/api/strikes":
                     # No svc.lock: a strike list is a pure instrument-book lookup, and the first request for
                     # an exchange not yet cached today (e.g. switching to SENSEX/BFO) has to load and parse
@@ -107,30 +108,33 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                                                            with_ltp=q.get("ltp") == "1", force=q.get("force") == "1"))
                 if u.path == "/api/spot":
                     return self._json(200, svc.spot(q["underlying"], with_ltp=q.get("ltp") == "1", force=q.get("force") == "1"))
-                if u.path == "/api/strategies":
-                    with svc.lock:
-                        return self._json(200, {"strategies": app.strategies.dashboard()})
-                m = re.fullmatch(r"/api/strategies/(\d+)", u.path)
-                if m:
-                    return self._json(200, {"strategy": app.strategies.view(int(m.group(1)))})
-                m = re.fullmatch(r"/api/trades/(\d+)", u.path)
-                if m:
-                    tid = int(m.group(1))
-                    with svc.lock:
-                        t = svc.repo.trade(tid)
-                        if not t:
-                            return self._json(404, {"error": "no such trade"})
-                        return self._json(200, {"trade": svc.trade_view(tid), "orders": svc.repo.orders(tid),
-                                                "events": svc.repo.events(tid)})
-                if u.path == "/api/events":
-                    with svc.lock:
-                        return self._json(200, {"events": svc.repo.events(limit=100)})
                 return self._json(404, {"error": "not found"})
             except (KeyError, ValueError, ActionError) as exc:
                 return self._json(400, {"error": str(exc)})
             except Exception as exc:
                 log.exception("GET %s", self.path)
                 return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+        def _read_view(self, path: str) -> None:
+            svc = app.service
+            rs = svc.reader()
+            try:
+                if path == "/api/dashboard":
+                    return self._json(200, rs.dashboard())
+                if path == "/api/events":
+                    return self._json(200, {"events": rs.repo.events(limit=100)})
+                st = app.strategies.reader(rs)
+                if path == "/api/strategies":
+                    return self._json(200, {"strategies": st.dashboard()})
+                kind, n = path.split("/")[2], int(path.split("/")[3])
+                if kind == "strategies":
+                    return self._json(200, {"strategy": st.view(n)})
+                if not rs.repo.trade(n):
+                    return self._json(404, {"error": "no such trade"})
+                return self._json(200, {"trade": rs.trade_view(n), "orders": rs.repo.orders(n), "events": rs.repo.events(n)})
+            finally:
+                if rs.repo is not svc.repo:
+                    rs.repo.close()
 
         def _stream(self) -> None:
             """Server-Sent Events (trader/stream.py): held open until the page goes away or the server stops."""

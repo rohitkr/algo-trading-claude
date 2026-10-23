@@ -339,19 +339,9 @@ class StrategyService:
         qty = (leg.get("lots") or 1) * inst.lot_size
         stop_loss = _resolve_price(entry_price, side, "sl", _num(leg.get("sl_value")), str(leg.get("sl_type") or "POINTS").upper())
         target = _resolve_price(entry_price, side, "tp", _num(leg.get("tp_value")), str(leg.get("tp_type") or "POINTS").upper())
-        sl_auto = stop_loss is None
-        if stop_loss is None:
-            # No per-leg stop was given: the strategy's own combined profit/loss exit covers this leg
-            # instead. The engine still needs SOME numeric stop_loss (every trade has one), so one is set
-            # here wide enough that it is very unlikely to be the thing that actually exits the leg - capped
-            # at 95% of TRADER_MAX_LOSS_PER_TRADE so a leg with no chosen stop still can't exceed the
-            # account's own configured per-trade loss limit.
-            wide_points = (self.svc.cfg.auto_sl_loss * 0.95) / qty
-            stop_loss = entry_price - wide_points if side == "BUY" else entry_price + wide_points
-        stop_loss = round_to_tick(stop_loss, inst.tick_size, "SELL" if side == "BUY" else "BUY")
-        if side == "BUY" and stop_loss <= 0:
-            raise ValueError("no stop-loss given and the account's max-loss-per-trade limit is too small "
-                             "for this quantity to derive a safe wide one - set a stop-loss for this leg")
+        sl_auto = False                     # no automatic stop: a blank SL means the leg has none (2026-10-23)
+        if stop_loss is not None:
+            stop_loss = round_to_tick(stop_loss, inst.tick_size, "SELL" if side == "BUY" else "BUY")
         if target is not None:
             target = round_to_tick(target, inst.tick_size, "BUY" if side == "BUY" else "SELL")
         return dict(underlying=inst.name, expiry=inst.expiry.isoformat(), strike=inst.strike,
@@ -407,7 +397,7 @@ class StrategyService:
         if moved < cfg.move_sl_to_cost_at:
             return
         cost = t["entry_avg_price"]
-        tightens = cost > t["current_sl"] if buy else cost < t["current_sl"]
+        tightens = t["current_sl"] is None or (cost > t["current_sl"] if buy else cost < t["current_sl"])
         if not tightens:
             return
         self.repo.update_trade(t["id"], current_sl=cost, user_sl=cost, stop_breached_at=None)
@@ -555,6 +545,13 @@ class StrategyService:
                              "status": t["status"], "error": t["error"] or t["status"]}
                             for t in legs if _never_placed(t)]
         return v
+
+    def reader(self, svc_reader) -> "StrategyService":
+        """Views for the page on a TradeService.reader() (no trading lock, read-only connection)."""
+        import copy
+        r = copy.copy(self)
+        r.svc, r.repo = svc_reader, svc_reader.repo
+        return r
 
     def dashboard(self) -> list[dict]:
         return [self._view(s) for s in self.repo.strategies()]

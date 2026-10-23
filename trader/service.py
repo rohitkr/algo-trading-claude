@@ -760,7 +760,7 @@ class TradeService:
 
     _KEEP = object()
 
-    def resume_trade(self, trade_id: int, stop_loss: float | None = None, target=_KEEP) -> dict:
+    def resume_trade(self, trade_id: int, stop_loss=_KEEP, target=_KEEP) -> dict:
         """A leg in ERROR (e.g. its exit orders kept failing) back under the algo: only when Zerodha holds exactly
         the position our fills say. You choose the SL (and target) first - it must be on the safe side of the live
         price, so resuming never exits at once by itself. Clears the failed exit; the next tick places the SL order.
@@ -774,9 +774,9 @@ class TradeService:
             raise ActionError("no live price for this contract right now: try again in a moment")
         buy = t["side"] == "BUY"
         tick = t["tick_size"]
-        sl = float(stop_loss if stop_loss not in (None, "") else t["current_sl"])
-        sl = round_to_tick(sl, tick, "SELL" if buy else "BUY")
-        if sl <= 0 or (sl >= ltp if buy else sl <= ltp):
+        raw = t["current_sl"] if stop_loss is self._KEEP else (stop_loss if stop_loss not in (None, "") else None)
+        sl = round_to_tick(float(raw), tick, "SELL" if buy else "BUY") if raw is not None else None   # None = no stop
+        if sl is not None and (sl <= 0 or (sl >= ltp if buy else sl <= ltp)):
             raise ActionError(f"SL {sl:g} is already through the live price {ltp:g}: set it "
                               f"{'below' if buy else 'above'} {ltp:g} (or exit the position instead)")
         tp = t["target"] if target is self._KEEP else (None if target in (None, "") else float(target))
@@ -1274,6 +1274,15 @@ class TradeService:
         want = q["open"] - partial_left
         sls = [o for o in q["orders"] if o["kind"] == "SL"]
         working = [o for o in sls if is_working(o["status"])]
+        if t["current_sl"] is None:
+            # No stop-loss on this leg (left blank, or removed by an edit): no SL order; one still working is taken off.
+            for w in working:
+                if w["broker_order_id"] and not w["cancel_requested"]:
+                    self.audit(t["id"], "SL_ORDER_REMOVED", "INFO", {"order": w["broker_order_id"], "detail": "no stop-loss set"})
+                    self.placer.cancel(w, "stop-loss removed")
+                    self._resync = True
+            self._activate(t)
+            return
         if t.get("sl_local") and ltp is None and want > 0:
             # A local stop can't be watched without a price. After TRADER_STOP_GRACE_SECONDS blind, fall back to
             # an SL order at Zerodha for good (no flapping between the two); the trade stays on it.
@@ -1368,7 +1377,7 @@ class TradeService:
         cand = round_to_tick(cand, t["tick_size"], "SELL" if buy else "BUY")    # BUY: round down, SELL: up
         step = t["trail_step"] or t["tick_size"]
         old = t["current_sl"]
-        if (buy and cand >= old + step - 1e-9) or (not buy and cand <= old - step + 1e-9):
+        if old is None or (buy and cand >= old + step - 1e-9) or (not buy and cand <= old - step + 1e-9):
             self.repo.update_trade(t["id"], current_sl=cand)
             t["current_sl"] = cand
             self.audit(t["id"], "TRAILING_SL_UPDATED", "INFO", {"old_sl": old, "new_sl": cand, "best": best, "ltp": ltp})
@@ -1522,6 +1531,8 @@ class TradeService:
 
     @staticmethod
     def _stop_breached(t: dict, ltp: float) -> bool:
+        if t["current_sl"] is None:                   # no stop-loss on this leg
+            return False
         return ltp <= t["current_sl"] if t["side"] == "BUY" else ltp >= t["current_sl"]
 
     @staticmethod
@@ -1531,6 +1542,8 @@ class TradeService:
     @staticmethod
     def _sl_reason(t: dict) -> str:
         base = t["user_sl"] if t.get("user_sl") is not None else t["initial_sl"]
+        if t["current_sl"] is None or base is None:
+            return L.STOP_LOSS_HIT if base is not None else L.TRAILING_SL_HIT
         return L.TRAILING_SL_HIT if abs(t["current_sl"] - base) > 1e-9 else L.STOP_LOSS_HIT
 
     def _sl_limit(self, t: dict, trigger: float) -> float:
@@ -1595,7 +1608,8 @@ class TradeService:
                 "product": t["product"], "lots": t["lots"], "lot_size": t["lot_size"], "quantity": t["quantity"],
                 "entry_price": t["entry_price"], "order_value": round(t["entry_price"] * t["quantity"], 2),
                 "stop_loss": t["initial_sl"], "target": t["target"],
-                "max_loss_at_sl": round(abs(t["entry_price"] - t["initial_sl"]) * t["quantity"], 2),
+                "max_loss_at_sl": (round(abs(t["entry_price"] - t["initial_sl"]) * t["quantity"], 2)
+                                   if t["initial_sl"] is not None else None),
                 "reward_at_target": round(abs(t["target"] - t["entry_price"]) * t["quantity"], 2) if t["target"] else None,
                 "trailing": {"type": t["trail_type"], "value": t["trail_value"], "step": t["trail_step"]}
                 if t["trail_enabled"] else None,
@@ -1644,6 +1658,15 @@ class TradeService:
                 elif snap is not None:
                     self._mark_kite_ltp(t, snap)
             return self.trade_view(trade_id)
+
+    def reader(self) -> "TradeService":
+        """This service for page reads only: its own read-only database connection and its own lock, so a read
+        never waits for a running tick. Close with reader.repo.close(). Never use it to act."""
+        import copy
+        r = copy.copy(self)
+        r.repo = Repository.reader(self.repo.path, self.repo.clock) if str(self.repo.path) != ":memory:" else self.repo
+        r.lock = threading.RLock()
+        return r
 
     def trade_view(self, trade_id: int) -> dict:
         t = self.repo.trade(trade_id)

@@ -39,7 +39,7 @@ def open_positions(trades: list[dict], exclude_group: int | None = None) -> set[
 
 
 def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange: str, underlying: str, side: str,
-              lots: int, quantity: int, entry: float, stop: float, ltp: float | None, open_trades: list[dict],
+              lots: int, quantity: int, entry: float, stop: float | None, ltp: float | None, open_trades: list[dict],
               trades_today: int, day_pnl: float, broker_net: int | None, halted: str | None,
               group_id: int | None = None) -> list[RiskCheck]:
     """Checks for opening one trade. A multi-leg strategy counts as ONE position toward max_open_trades and
@@ -75,8 +75,10 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
     value = entry * quantity
     if cfg.max_order_value:
         add("max_order_value", value <= cfg.max_order_value, f"₹{value:,.0f}, limit ₹{cfg.max_order_value:,.0f}")
-    risk = abs(entry - stop) * quantity
-    if cfg.max_loss_per_trade:
+    risk = abs(entry - stop) * quantity if stop is not None else None
+    if cfg.max_loss_per_trade and risk is None:
+        add("max_loss_per_trade", True, "no stop-loss set: the loss is not capped by a stop")
+    elif cfg.max_loss_per_trade:
         add("max_loss_per_trade", risk <= cfg.max_loss_per_trade,
             f"₹{risk:,.0f} at the stop, limit ₹{cfg.max_loss_per_trade:,.0f}")
     if cfg.max_daily_loss:
@@ -106,7 +108,7 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
         dev = abs(entry - ltp) / ltp * 100
         add("entry_near_ltp", dev <= cfg.max_entry_deviation_pct,
             f"entry {entry} is {dev:.1f}% from LTP {ltp}, limit {cfg.max_entry_deviation_pct}%")
-    if ltp is not None:
+    if ltp is not None and stop is not None:
         wrong_side = (side == "BUY" and ltp <= stop) or (side == "SELL" and ltp >= stop)
         add("ltp_not_through_stop", not wrong_side,
             f"LTP {ltp} is already through the stop {stop}" if wrong_side else f"LTP {ltp}, stop {stop}")

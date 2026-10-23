@@ -973,7 +973,7 @@ function confirmOrders(active) {
         <td><button type="button" class="bs-btn ${r.leg.side === "BUY" ? "buy" : "sell"}" data-flip="${i}"
           title="Switch BUY / SELL">${r.leg.side === "BUY" ? "B" : "S"}</button>
           <span class="bs-btn ${r.leg.option_type === "CE" ? "ce" : "pe"} tag">${r.leg.option_type}</span></td>
-        <td>${esc(r.leg.underlying)} ${r.leg.strike}</td><td>${r.leg.lots}</td>
+        <td>${esc(r.leg.underlying)} ${r.leg.strike}${r.leg.sl_value == null || r.leg.sl_value === "" ? ' <small class="no-sl" title="No stop-loss on this leg">no SL</small>' : ""}</td><td>${r.leg.lots}</td>
         <td><select data-type="${i}"><option value="LIMIT"${r.type === "LIMIT" ? " selected" : ""}>Limit</option>
           <option value="MARKET"${r.type === "MARKET" ? " selected" : ""}>Market</option></select></td>
         <td class="num ltp-cell" data-ltp-row="${i}" title="Live price: click to use it as the limit">${r.ltp != null ? num(r.ltp) : "–"}</td>
@@ -1380,7 +1380,7 @@ async function editLeg(tid) {
         target <b>${t.target != null ? num(t.target) : "none"}</b></p>
       <div id="leg-edit-form" class="edit-leg-grid">
       ${entryOpen ? f("entry_price", `<span>Entry limit ₹ ${ltpBtn("#leg-edit-form input[name=entry_price]")}</span>`, t.entry_price) + f("lots", `Lots (filled ${t.filled_qty})`, t.lots, 'type="number" step="1" min="1"') : ""}
-      <label>Stop-loss <span class="slp-cell">
+      <label>Stop-loss <small>(blank = none)</small> <span class="slp-cell">
         <input id="edit-sl-value" type="number" step="any" min="0" value="${shown("sl", t.current_sl, slMode)}">
         <select id="edit-sl-type" data-prev="${slMode}">${typeOpts("sl", slMode)}</select>
       </span></label>
@@ -1432,7 +1432,7 @@ async function editLeg(tid) {
     const slPrice = toTick(slTpValueToPrice(ref, t.side, "sl", slVal, $("#edit-sl-type").value), tick);
     const tpPrice = tpVal === "" ? null : toTick(slTpValueToPrice(ref, t.side, "tp", tpVal, $("#edit-tp-type").value), tick);
     if (changes.entry_price !== undefined && changes.entry_price !== "") changes.entry_price = toTick(Number(changes.entry_price), tick);
-    if (slPrice != null) changes.stop_loss = slPrice;
+    changes.stop_loss = slVal === "" ? "" : slPrice;      // blank = no stop-loss (an existing SL order is removed)
     changes.target = tpPrice ?? "";
     const p = await api(`/api/trades/${tid}/edit/prepare`, {changes});
     if (!p.ok && (p.errors || []).join() === "nothing changed") return;   // saved without changes: just close

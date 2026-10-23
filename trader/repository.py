@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+import re
 import threading
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -52,8 +53,8 @@ CREATE TABLE IF NOT EXISTS trades (
     filled_qty          INTEGER NOT NULL DEFAULT 0, -- entry quantity actually executed
     exited_qty          INTEGER NOT NULL DEFAULT 0, -- executed by our SL / partial / exit orders
     open_qty            INTEGER NOT NULL DEFAULT 0, -- filled - exited (unsigned; direction = side)
-    initial_sl          REAL NOT NULL,
-    current_sl          REAL NOT NULL,
+    initial_sl          REAL,                       -- NULL = no stop-loss (the user left it blank)
+    current_sl          REAL,
     user_sl             REAL,                       -- SL last set by an edit (trailing is measured from it)
     target              REAL,
     trail_enabled       INTEGER NOT NULL DEFAULT 0,
@@ -226,7 +227,45 @@ class Repository:
             self.conn.execute("INSERT OR IGNORE INTO meta VALUES ('tag_salt', ?)", (secrets.token_hex(2),))
         self.tag_salt = self.meta("tag_salt")
 
+    def _relax_sl_not_null(self) -> None:
+        """2026-10-23: a leg may have NO stop-loss. Old databases have initial_sl / current_sl NOT NULL; drop just that
+        constraint in place (SQLite's documented writable_schema procedure for removing NOT NULL: the stored rows are
+        unchanged), then verify the database."""
+        cols = {r["name"]: r["notnull"] for r in self.conn.execute("PRAGMA table_info(trades)")}
+        if not (cols.get("initial_sl") or cols.get("current_sl")):
+            return
+        sql = self.conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'").fetchone()[0]
+        new = re.sub(r"\b(initial_sl|current_sl)(\s+)REAL NOT NULL", r"\1\2REAL", sql)
+        if new == sql:
+            raise RuntimeError("trades schema: could not relax NOT NULL on the stop-loss columns")
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            version = self.conn.execute("PRAGMA schema_version").fetchone()[0]
+            self.conn.execute("PRAGMA writable_schema=ON")
+            self.conn.execute("UPDATE sqlite_master SET sql=? WHERE type='table' AND name='trades'", (new,))
+            self.conn.execute(f"PRAGMA schema_version={int(version) + 1}")
+            self.conn.execute("PRAGMA writable_schema=OFF")
+            self.conn.execute("COMMIT")
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        ok = self.conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if ok != "ok":
+            raise RuntimeError(f"database integrity check after the stop-loss migration: {ok}")
+
+    @classmethod
+    def reader(cls, path: str | Path, clock) -> "Repository":
+        """A read-only view on its own connection (no schema/migration work): the web page's reads use it so they never
+        wait for the trading lock, which a tick holds across its Zerodha calls (2-4 s on a slow network)."""
+        r = cls.__new__(cls)
+        r.path, r.clock, r._lock = Path(path), clock, threading.RLock()
+        r.conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False, timeout=30)
+        r.conn.row_factory = sqlite3.Row
+        r.tag_salt = None
+        return r
+
     def _migrate(self) -> None:
+        self._relax_sl_not_null()
         for table, cols in ADDED_COLUMNS.items():
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             for name, typ in cols:

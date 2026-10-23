@@ -14,7 +14,7 @@ class TradeRequest:
     side: str                      # BUY | SELL
     lots: int
     entry_price: float
-    stop_loss: float
+    stop_loss: float | None        # None = no stop-loss (only what the user sets)
     target: float | None = None
     product: str = "MIS"
     trail_enabled: bool = False
@@ -51,7 +51,7 @@ class TradeRequest:
             side=str(d.get("side", "")).upper(),
             lots=num("lots", int),
             entry_price=num("entry_price"),
-            stop_loss=num("stop_loss"),
+            stop_loss=num("stop_loss", required=False),
             target=num("target", required=False),
             product=str(d.get("product") or default_product).upper(),
             trail_enabled=flag("trail_enabled"),
@@ -84,7 +84,7 @@ def validate(req: TradeRequest, lot_size: int, tick: float, now: datetime) -> li
         e.append("lot size unknown")
     if req.entry_price <= 0:
         e.append("entry price must be > 0")
-    if req.stop_loss <= 0:
+    if req.stop_loss is not None and req.stop_loss <= 0:
         e.append("stop-loss must be > 0")
     if req.target is not None and req.target <= 0:
         e.append("target must be > 0")
@@ -94,13 +94,13 @@ def validate(req: TradeRequest, lot_size: int, tick: float, now: datetime) -> li
             e.append(f"{name} {v} is not a multiple of the tick size {tick}")
     buy = req.side == "BUY"
     if buy:
-        if req.stop_loss >= req.entry_price:
+        if req.stop_loss is not None and req.stop_loss >= req.entry_price:
             e.append(f"BUY: stop-loss ₹{req.stop_loss:g} must be BELOW the entry ₹{req.entry_price:g} "
                      f"(you exit if the price falls)")
         if req.target is not None and req.target <= req.entry_price:
             e.append(f"BUY: target ₹{req.target:g} must be ABOVE the entry ₹{req.entry_price:g}")
     elif req.side == "SELL":
-        if req.stop_loss <= req.entry_price:
+        if req.stop_loss is not None and req.stop_loss <= req.entry_price:
             d = req.entry_price - req.stop_loss
             e.append(f"SELL: stop-loss ₹{req.stop_loss:g} must be ABOVE the entry ₹{req.entry_price:g} "
                      f"(a SELL loses when the price rises; {d:g} points of risk is a stop-loss of "

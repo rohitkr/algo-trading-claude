@@ -31,17 +31,15 @@ def loss(t) -> float:
     return (t["entry_price"] - t["current_sl"]) * t["quantity"]
 
 
-def test_raising_a_pending_entry_moves_the_automatic_stop(tmp_path):
+def test_raising_a_pending_entry_keeps_no_stop(tmp_path):
     r, tid = pending_leg_without_sl(tmp_path)
     t = r.trade(tid)
-    assert t["sl_auto"] == 1 and loss(t) <= LIMIT
-    # exactly what the edit dialog sends: new entry, the unchanged (automatic) stop
-    plan = r.svc.prepare_edit(tid, {"entry_price": 80, "lots": 5, "stop_loss": t["current_sl"], "target": ""})
+    assert t["current_sl"] is None and not t["sl_auto"]
+    plan = r.svc.prepare_edit(tid, {"entry_price": 80, "lots": 5, "stop_loss": "", "target": ""})
     assert plan["ok"], plan
     r.svc.apply_edit(tid, plan["token"])
     t = r.trade(tid)
-    assert t["entry_price"] == 80 and t["current_sl"] > 48.4 and loss(t) <= LIMIT
-    assert t["sl_auto"] == 1
+    assert t["entry_price"] == 80 and t["current_sl"] is None
 
 
 def test_a_stop_the_user_sets_is_kept_and_no_longer_automatic(tmp_path):

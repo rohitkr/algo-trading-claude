@@ -209,3 +209,31 @@ def test_dashboard_reports_the_breeze_login_for_the_header_light(web):
     r, base = web
     code, d = call(base, "/api/dashboard")
     assert code == 200 and "logged_in_today" in d["breeze_login"]
+
+
+def test_page_reads_never_wait_for_the_trading_lock(web):
+    """2026-10-22: Edit / Exit took 2-4 s to open - the reads waited for a tick holding the lock over its Zerodha calls."""
+    import time
+    r, base = web
+    r.price(100)
+    tid = r.open_trade()
+    r.tick()
+    held, release = threading.Event(), threading.Event()
+
+    def slow_tick():
+        with r.svc.lock:
+            held.set()
+            release.wait(5)
+    th = threading.Thread(target=slow_tick, daemon=True)
+    th.start()
+    held.wait(2)
+    try:
+        for path in (f"/api/trades/{tid}", "/api/dashboard", "/api/strategies", "/api/events"):
+            t0 = time.monotonic()
+            code, body = call(base, path)
+            assert code == 200 and time.monotonic() - t0 < 1.0, path
+        assert body["events"] and call(base, f"/api/trades/{tid}")[1]["trade"]["id"] == tid
+        assert call(base, "/api/trades/99999")[0] == 404
+    finally:
+        release.set()
+        th.join(2)

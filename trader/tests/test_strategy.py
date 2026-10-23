@@ -175,19 +175,18 @@ def test_profit_trailing_lock_and_trail(tmp_path):
         assert (t["status"], t["exit_reason"]) == (L.EXITED, "STRATEGY_TRAIL_STOP")
 
 
-def test_leg_without_sl_gets_a_wide_auto_stop(tmp_path):
+def test_leg_without_sl_has_no_stop_at_all(tmp_path):
+    """2026-10-23: no automatic stop any more - a blank SL means the leg has none (and no SL order at Zerodha)."""
     r = Rig(tmp_path, max_loss_per_trade=10000)
     r.quotes.set(CE, 100)
     strat = _strategy(r)
     payload = {"config": {"order_type": "MIS"},
-              "legs": [dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
-                            side="BUY", lots=1, entry_price=100)]}       # no sl_value at all
+               "legs": [dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE",
+                             side="BUY", lots=1, entry_price=100)]}       # no sl_value at all
     res = strat.create_and_trade(payload)
     assert res["ok"], res
     t = r.trade(res["confirmed"][0])
-    # BUY: stop below entry, and the account's own risk check already bounds it to <= max_loss_per_trade
-    assert t["initial_sl"] < 100
-    assert abs(100 - t["initial_sl"]) * t["quantity"] <= 10000 + 1e-6
+    assert t["initial_sl"] is None and t["current_sl"] is None and not t["sl_auto"]
 
 
 def test_buy_legs_placed_before_sell_legs(tmp_path):

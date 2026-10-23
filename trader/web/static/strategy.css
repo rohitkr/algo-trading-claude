@@ -534,3 +534,4 @@ table.order-confirm td:last-child button + button { margin-left: 4px; }
 .legs-live tr.fill-row td.num { color: var(--fg); }
 .fill-kind { display: inline-block; width: 16px; text-align: center; font-weight: 700; border-radius: 3px; font-size: 10px; }
 .fill-kind.in { color: var(--buy); } .fill-kind.out { color: var(--sell); }
+.order-confirm .no-sl { color: var(--sell); font-weight: 600; font-size: 10px; margin-left: 4px; }
