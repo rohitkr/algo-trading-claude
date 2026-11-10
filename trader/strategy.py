@@ -183,7 +183,8 @@ class StrategyService:
             sid = self.repo.insert_strategy(dict(mode=self.svc.cfg.mode,
                                                  name=cfg.name or f"Strategy {now:%H:%M:%S}",
                                                  config=json.dumps(cfg.to_json())))
-            previews, errors = [], []
+            previews, errors, warnings = [], [], []
+            ack = bool(payload.get("ack_warnings"))      # the user said Execute on the warning pop-up
             for i, leg in enumerate(legs_in, 1):
                 tag = f"{leg.get('side')} {leg.get('option_type')} {leg.get('strike')}"
                 try:
@@ -193,14 +194,20 @@ class StrategyService:
                     continue
                 # preview only STORES the leg (grouped); nothing is placed yet
                 p = self.svc.preview(req, group_id=sid, leg_role=str(leg.get("leg_role") or "") or None,
-                                     sl_auto=bool(req.pop("sl_auto", False)), sl_local=req.pop("sl_local", None))
+                                     sl_auto=bool(req.pop("sl_auto", False)), sl_local=req.pop("sl_local", None),
+                                     ack_warnings=ack)
+                if p.get("needs_ack"):
+                    warnings += p["warnings"]
+                    previews.append((leg, p))
+                    continue
                 if not p["ok"]:
                     errors += [f"leg {i} ({tag}): {e}" for e in p["errors"]]
                     # a stop on the wrong side already explains itself: don't repeat it as "LTP through the stop"
                     wrong_side = any("stop-loss" in e for e in p["errors"])
                     errors += [f"leg {i} ({tag}): {c['name']} ({c['detail']})"
                                for c in (p.get("risk") or [])
-                               if not c["passed"] and not (wrong_side and c["name"] == "ltp_not_through_stop")]
+                               if not c["passed"] and not c.get("warn")
+                               and not (wrong_side and c["name"] == "ltp_not_through_stop")]
                     continue
                 previews.append((leg, p))
             if errors:
@@ -210,6 +217,12 @@ class StrategyService:
                 self.repo.discard_strategy(sid)      # nothing was placed: no strategy card, reasons returned
                 self.svc.audit(None, "STRATEGY_REJECTED", "WARNING", {"errors": errors})
                 return {"ok": False, "errors": errors}
+            if warnings:
+                # nothing placed yet: the page asks "still execute?" and sends the same order again with ack_warnings
+                for _, p in previews:
+                    self._not_placed(p["trade_id"], "not placed: waiting for Execute on the warning")
+                self.repo.discard_strategy(sid)
+                return {"ok": False, "needs_ack": True, "warnings": warnings, "errors": []}
 
             confirmed, failed = [], []
             hedge_failed = None
@@ -280,12 +293,16 @@ class StrategyService:
             except (KeyError, ValueError) as exc:
                 return {"ok": False, "errors": [str(exc)]}
             p = self.svc.preview(req, group_id=s["id"], leg_role=t.get("leg_role"),
-                                 sl_auto=bool(req.pop("sl_auto", False)), sl_local=req.pop("sl_local", None))
+                                 sl_auto=bool(req.pop("sl_auto", False)), sl_local=req.pop("sl_local", None),
+                                 ack_warnings=bool(payload.get("ack_warnings")))
             if not p["ok"]:
                 if p.get("trade_id"):
                     self.repo.update_trade(p["trade_id"], group_id=None)    # not placed: keep it off the card
+                if p.get("needs_ack"):
+                    return {"ok": False, "needs_ack": True, "warnings": p["warnings"], "errors": []}
                 return {"ok": False, "errors": p["errors"] + [f"{c['name']}: {c['detail']}"
-                                                               for c in (p.get("risk") or []) if not c["passed"]]}
+                                                               for c in (p.get("risk") or [])
+                                                               if not c["passed"] and not c.get("warn")]}
             try:
                 self.svc.confirm(p["trade_id"], p["token"])
             except ActionError as exc:

@@ -1099,6 +1099,26 @@ async function confirmTight(warnings) {
   return pending;
 }
 
+// The server only WARNS about some things (e.g. Zerodha already shows a position in this contract that this app did
+// not open): it places nothing and asks. Execute (the focused button, so Enter) sends the same order again with
+// ack_warnings; Cancel places nothing. The app never refuses on its own for these.
+async function stillExecute(warnings) {
+  const pending = dialog("Still execute?", `<ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
+    <p class="hint small">Execute places the order anyway; that position stays yours and is kept apart from this trade.</p>`,
+    MODE === "LIVE");
+  okButton("Execute");
+  return pending;
+}
+// POST, and if the server asks (needs_ack), show the warning and re-send with ack_warnings on Execute.
+async function apiAck(url, body) {
+  let res = await api(url, body);
+  if (res.needs_ack) {
+    if (!(await stillExecute(res.warnings || []))) return {ok: false, cancelled: true};
+    res = await api(url, {...body, ack_warnings: true});
+  }
+  return res;
+}
+
 // Trade all: the Place order pop-up (legs, order, Limit/Market, LTP) - the one check before a new strategy goes in.
 $("#trade-all").onclick = async () => {
   const active = LEGS.filter((l) => l.checked);
@@ -1108,7 +1128,8 @@ $("#trade-all").onclick = async () => {
   if (!ordered) return;
   $("#trade-all").disabled = true;
   try {
-    const res = await api("/api/strategies/trade_all", {config: collectConfig(), legs: ordered, keep_order: true});
+    const res = await apiAck("/api/strategies/trade_all", {config: collectConfig(), legs: ordered, keep_order: true});
+    if (res.cancelled) return;
     if (!res.ok) {
       if (await offerExitInstead(res.errors || [], ordered)) return;
       return alertBox("Not placed", res.errors || ["unknown error"]);
@@ -1167,29 +1188,47 @@ async function exitQty(t, qty) {
   return api(`/api/trades/${t.id}/partial/confirm`, {token: p.token});
 }
 
-async function exitStrategy(id, choose = false) {
+async function exitStrategy(id) {
   try {
     const s = (await api(`/api/strategies/${id}`)).strategy;
     const openLegs = s.legs.filter((t) => LEG_LIVE_STATUSES.has(t.status) && t.filled_qty > 0 && !t.pending_exit_reason);
     if (!openLegs.length) return alertBox("Nothing to exit", ["no open legs on this strategy"]);
-    if (!choose) {                                   // one click: everything at market, now
-      await api(`/api/strategies/${id}/exit`, {});
-      return refreshStrategies();
-    }
+    // Market (default) or a Limit price per leg (blank = market). Enter / Exit confirms.
     const rows = openLegs.map((t) => {
-      const lots = Math.floor(t.open_qty / t.lot_size);
-      return `<tr><td>${esc(t.side)} ${esc(t.tradingsymbol)}</td><td>${lots} lot(s) open</td>
-        <td><input type="number" min="1" max="${lots}" step="1" value="${lots}" data-tid="${t.id}" class="exit-qty-input"></td></tr>`;
+      const lots = Math.floor(t.open_qty / t.lot_size), ltp = t.kite_ltp ?? t.last_ltp;
+      return `<tr><td><span class="bs-btn ${t.side === "BUY" ? "buy" : "sell"} chip">${t.side === "BUY" ? "B" : "S"}</span> ${contractName(t)}</td>
+        <td class="num">${t.open_qty}</td><td class="num">${num(ltp)}</td>
+        <td><input type="number" min="1" max="${lots}" step="1" value="${lots}" data-tid="${t.id}" class="exit-qty-input"></td>
+        <td><input type="number" step="any" min="0" placeholder="market" data-tid="${t.id}" class="exit-px-input"></td></tr>`;
     }).join("");
-    const ok = await dialog("Exit this strategy?",
-      `<p class="hint small">Lots to exit per leg - defaults to the full open amount, edit any row to exit less.</p>
-       <table><tr><th>Leg</th><th>Open</th><th>Lots to exit</th></tr>${rows}</table>`, MODE === "LIVE");
-    if (!ok) return;
+    const pending = dialog("Exit this strategy?",
+      `<div class="side-toggle exit-type" role="radiogroup" aria-label="Exit type">
+         <button type="button" data-xt="MARKET" class="on">Market</button><button type="button" data-xt="LIMIT">Limit at LTP</button></div>
+       <table class="exit-strat"><tr><th>Leg</th><th class="num">Open</th><th class="num">LTP</th><th>Lots to exit</th><th>Limit ₹</th></tr>${rows}</table>
+       <p class="hint small">Market exits now. A Limit price waits at that price (never chased; the SL keeps protecting the rest).
+         Leave a price blank for market.</p>`, MODE === "LIVE");
+    okButton("Exit");
+    $$("#dlg-body .exit-type button").forEach((b) => { b.onclick = () => {
+      $$("#dlg-body .exit-type button").forEach((x) => x.classList.toggle("on", x === b));
+      $$(".exit-px-input").forEach((el) => {                 // Limit at LTP fills every price box; Market clears them
+        const t = openLegs.find((x) => x.id === Number(el.dataset.tid)), ltp = t.kite_ltp ?? t.last_ltp;
+        el.value = b.dataset.xt === "LIMIT" && ltp != null ? toTick(Number(ltp), Number(t.tick_size) || 0.05) : "";
+      });
+    }; });
+    $(".exit-qty-input")?.focus();
+    if (!(await pending)) return;
+    const errs = [];
     for (const el of $$(".exit-qty-input")) {
       const leg = openLegs.find((t) => t.id === Number(el.dataset.tid));
       const lots = Math.max(0, Math.min(Math.floor(leg.open_qty / leg.lot_size), Math.floor(Number(el.value)) || 0));
-      if (lots > 0) await exitQty(leg, lots * leg.lot_size);
+      const px = Number($(`.exit-px-input[data-tid="${leg.id}"]`).value);
+      if (lots <= 0) continue;
+      try {
+        if (px > 0) await api(`/api/trades/${leg.id}/limit_exit`, {qty: lots * leg.lot_size, price: toTick(px, Number(leg.tick_size) || 0.05)});
+        else await exitQty(leg, lots * leg.lot_size);
+      } catch (e) { errs.push(`${leg.tradingsymbol}: ${e.message}`); }
     }
+    if (errs.length) alertBox("Some legs not exited", errs);
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
 }
@@ -1659,7 +1698,7 @@ function chartShell(st) {
   };
   svg.addEventListener("mouseup", up);
   window.addEventListener("mouseup", () => { if (st.drag && $("#ch-svg")) up(); });
-  svg.addEventListener("mouseleave", () => { if (!st.drag) ["#ch-x", "#ch-dot", "#ch-tip"].forEach((q) => $(q)?.classList.add("hidden")); });
+  svg.addEventListener("mouseleave", () => { if (!st.drag) ["#ch-x", "#ch-y", "#ch-yb", "#ch-yt", "#ch-dot", "#ch-tip"].forEach((q) => $(q)?.classList.add("hidden")); });
 }
 function renderChart(st, pendingDrag) {
   if (st.zx0 == null || Math.round(st.zx0) !== st.x0 || Math.round(st.zx1) !== st.x1) { st.zx0 = st.x0; st.zx1 = st.x1; }
@@ -1697,7 +1736,11 @@ function renderChart(st, pendingDrag) {
       <rect class="ch-tag ${cls}" x="${CH.l + W + 1}" y="${Y(v) - 8}" width="${CH.r - 2}" height="16" rx="3"/>
       <text class="ch-tagt" x="${CH.l + W + 5}" y="${Y(v) + 4}">${n === "LTP" ? "" : n[0] + " "}${num(v)}</text>`).join("")}
     ${entryIdx >= 0 && d.entry != null ? `<circle class="ch-entry" cx="${X(entryIdx)}" cy="${Y(d.entry)}" r="4"/>` : ""}
-    <line id="ch-x" class="ch-cross hidden" y1="${CH.t}" y2="${CH.t + H}"/><circle id="ch-dot" class="ch-dot hidden" r="3.5"/>`;
+    <line id="ch-x" class="ch-cross hidden" y1="${CH.t}" y2="${CH.t + H}"/>
+    <line id="ch-y" class="ch-cross hidden" x1="${CH.l}" x2="${CH.l + W}"/>
+    <rect id="ch-yb" class="ch-ytag hidden" x="${CH.l + W + 1}" width="${CH.r - 2}" height="16" rx="3"/>
+    <text id="ch-yt" class="ch-ytagt hidden" x="${CH.l + W + 5}"></text>
+    <circle id="ch-dot" class="ch-dot hidden" r="3.5"/>`;
   // header stats
   const buy = d.side === "BUY", moved = d.entry != null ? ltp - d.entry : null;
   const today = all.filter((x) => x[0].slice(0, 10) === all[all.length - 1][0].slice(0, 10));
@@ -1724,11 +1767,16 @@ function hoverChart(st, p, svg) {
   svg.style.cursor = near ? "ns-resize" : "crosshair";
   $("#ch-x").setAttribute("x1", px); $("#ch-x").setAttribute("x2", px); $("#ch-x").classList.remove("hidden");
   $("#ch-dot").setAttribute("cx", px); $("#ch-dot").setAttribute("cy", g.Y(k[4])); $("#ch-dot").classList.remove("hidden");
+  // the crosshair's horizontal line: the price at the pointer, tagged on the price axis
+  const H = CH.h - CH.t - CH.b, cy = Math.max(CH.t, Math.min(CH.t + H, p.y)), at = toTick(g.P(cy), g.tick);
+  $("#ch-y").setAttribute("y1", cy); $("#ch-y").setAttribute("y2", cy); $("#ch-y").classList.remove("hidden");
+  $("#ch-yb").setAttribute("y", cy - 8); $("#ch-yb").classList.remove("hidden");
+  $("#ch-yt").setAttribute("y", cy + 4); $("#ch-yt").textContent = num(at); $("#ch-yt").classList.remove("hidden");
   const tip = $("#ch-tip"), vs = d.entry != null ? ` · vs entry ${(k[4] - d.entry > 0 ? "+" : "") + num(Math.round((k[4] - d.entry) * 100) / 100)}` : "";
-  tip.textContent = `${k[0].slice(8, 10)}/${k[0].slice(5, 7)} ${k[0].slice(11, 16)} · ${num(k[4])} (H ${num(k[2])} L ${num(k[3])})${vs}`;
+  tip.textContent = `${k[0].slice(8, 10)}/${k[0].slice(5, 7)} ${k[0].slice(11, 16)} · price at pointer ${num(at)} · close ${num(k[4])} (H ${num(k[2])} L ${num(k[3])})${vs}`;
   tip.classList.remove("hidden");
   const r = svg.getBoundingClientRect();
-  tip.style.left = `${Math.min(r.width - 280, Math.max(0, (px / CH.w) * r.width - 130))}px`;
+  tip.style.left = `${Math.min(r.width - 400, Math.max(0, (px / CH.w) * r.width - 190))}px`;
 }
 
 // Move a strategy's stop-losses between Zerodha (a resting SL order) and local (watched by the algo).
@@ -1831,9 +1879,10 @@ async function addToLeg(tid, reenter) {
     if (!(await pending)) return;
     const n = (id) => (!$(id) || $(id).value === "" ? null : toTick(Number($(id).value), tick));
     const what = `${side === "BUY" ? "Buy" : "Sell"} ${t.tradingsymbol}`;
-    const r = await api(`/api/strategies/legs/${tid}/add`, {
+    const r = await apiAck(`/api/strategies/legs/${tid}/add`, {
       side, lots: Math.floor(Number($("#add-lots").value)) || 0, price_type: $("#add-type").value,
       entry_price: n("#add-price"), stop_loss: n("#add-sl"), target: n("#add-tp")});
+    if (r.cancelled) return;
     if (!r.ok) return alertBox(`${what}: not placed`, r.errors || []);
     refreshStrategies();
   } catch (e) { alertBox("Error", [e.message]); }
@@ -2038,8 +2087,21 @@ Live.onStrategy((id, v) => {
   const s = STRATEGIES.find((x) => x.id === id);
   if (s && v != null) { s.combined_pnl = v; renderPeriodTotal(); }
 });
-// "Show cancelled": strategies where nothing was ever bought or sold are hidden by default (remembered).
+// "Show cancelled": strategies where nothing was ever bought or sold are hidden by default (remembered). A leg
+// Zerodha refused is announced once in a pop-up (below) and is otherwise only under "Show cancelled".
 const placedSomething = (s) => s.status === "ACTIVE" || (s.legs || []).some((t) => (t.filled_qty || 0) > 0);
+// A leg Zerodha refused after Trade all: say so at once, with Zerodha's reason (once per leg; the ones already
+// rejected when the page loads are not re-announced).
+let REJECTED_SEEN = null;
+function announceRejections() {
+  const now = STRATEGIES.flatMap((s) => (s.failed_legs || []).filter((f) => f.status === "REJECTED"));
+  if (REJECTED_SEEN === null) { REJECTED_SEEN = new Set(now.map((f) => f.id)); return; }
+  const fresh = now.filter((f) => !REJECTED_SEEN.has(f.id));
+  fresh.forEach((f) => REJECTED_SEEN.add(f.id));
+  if (fresh.length && !$("#dlg").open) {
+    alertBox("Zerodha did NOT place the order", fresh.map((f) => `#${f.id} ${f.side} ${f.tradingsymbol}: ${f.error}`));
+  }
+}
 let SHOW_CANCELLED = false;
 try { SHOW_CANCELLED = localStorage.getItem("trader:strategies:show-cancelled") === "1"; } catch (e) { /* ignore */ }
 {
@@ -2085,6 +2147,7 @@ async function refreshStrategies() {
     STRATEGIES = (await api("/api/strategies")).strategies;
     await Promise.all([...LEG_OPEN].map(loadFills));          // expanded legs: their fills, fresh
     renderStrategies();
+    announceRejections();
   } catch (e) { /* keep the last render */ }
 }
 // Manual LTP refresh: no click-count limit of our own (max_age=0 on every call) - Breeze's own daily

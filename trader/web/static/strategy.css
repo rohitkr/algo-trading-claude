@@ -555,9 +555,11 @@ dialog.wide-dlg { max-width: 860px; }
 .lv-tp { stroke: var(--buy); fill: var(--buy); color: var(--buy); } .lv-ltp { stroke: #e0a800; fill: #e0a800; color: #e0a800; }
 .ch-entry { fill: #6f8cff; stroke: #fff; stroke-width: 1.5; }
 .ch-cross { stroke: var(--muted); stroke-width: 1; } .ch-dot { fill: var(--accent); stroke: #fff; stroke-width: 1; }
+.ch-ytag { fill: var(--muted); } .ch-ytagt { fill: var(--card); font-size: 10px; font-weight: 700; }
 .ch-tip { position: absolute; top: 74px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
   font-size: 12px; pointer-events: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
 .ch-svg { height: 320px; user-select: none; cursor: crosshair; }
 .ch-lv.drag { stroke-width: 1.8; } .ch-lv.dragging { stroke-dasharray: none; stroke-width: 2.4; }
 .ch-grab { stroke: transparent; stroke-width: 12; cursor: ns-resize; }
 .ch-msg { font-size: 12px; color: var(--accent); margin-left: 8px; }
+.exit-strat td, .exit-strat th { padding: 6px 8px; white-space: nowrap; } .exit-strat input { width: 90px; }

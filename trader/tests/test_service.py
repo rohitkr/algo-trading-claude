@@ -493,6 +493,34 @@ def test_risk_window_lots_and_duplicate_symbol(tmp_path):
     assert "no_outside_position" in {c["name"] for c in p["risk"] if not c["passed"]}
 
 
+def test_position_open_in_kite_only_warns_and_is_kept_apart(tmp_path):
+    r = Rig(tmp_path)
+    r.price(100)
+    r.ex.manual_order("NFO", SYM, "MIS", "BUY", 195, 100)          # opened by hand in Kite
+    req = dict(underlying="NIFTY", expiry=EXPIRY.isoformat(), strike=25000, option_type="CE", side="BUY",
+               lots=1, entry_price=100, stop_loss=90)
+    p = r.svc.preview(req)
+    assert not p["ok"] and p["needs_ack"] and "token" not in p
+    assert p["warnings"] == [f"Zerodha already shows 195 of {SYM} not opened here"]
+    n = len(r.places())
+    assert n == 1                                                    # the manual order only: nothing placed
+    p = r.svc.preview(req, ack_warnings=True)                        # Execute
+    assert p["ok"], p
+    r.svc.confirm(p["trade_id"], p["token"])
+    tid = p["trade_id"]
+    assert r.trade(tid)["outside_base"] == 195
+    r.tick()
+    r.tick()
+    t = r.trade(tid)
+    assert (t["status"], t["open_qty"], t["mismatch_count"]) == (L.POSITION_ACTIVE, 65, 0)   # Zerodha 260, ours 65
+    assert r.repo.orders(tid, "SL")[0]["quantity"] == 65
+    r.ex.set_position("NFO", SYM, "MIS", 65)                         # the Kite position closed by hand
+    r.tick()
+    t = r.trade(tid)
+    assert (t["status"], t["open_qty"], t["outside_base"]) == (L.POSITION_ACTIVE, 65, 0)
+    assert "OUTSIDE_POSITION_CLOSED" in r.events(tid)
+
+
 def test_daily_loss_halts_new_trades(tmp_path):
     r = Rig(tmp_path, max_daily_loss=500, max_loss_per_trade=5000)
     tid = _active(r)

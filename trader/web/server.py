@@ -196,7 +196,7 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
             svc = app.service
             try:
                 if u.path == "/api/preview":
-                    return self._json(200, svc.preview(body))
+                    return self._json(200, svc.preview(body, ack_warnings=bool(body.get("ack_warnings"))))
                 m = re.fullmatch(r"/api/trades/(\d+)/limit_exit", u.path)
                 if m:
                     tid, act = int(m.group(1)), str(body.get("action") or "place")

@@ -1,6 +1,7 @@
 """Pre-trade risk checks (server-side, at preview AND again at confirm, right before the entry order).
 
 Every check is returned (passed or failed) and written to the audit trail. Exits are never blocked.
+A `warn` check never blocks by itself: the page asks (Execute / Cancel) and the trade goes in on Execute.
 """
 from __future__ import annotations
 
@@ -16,6 +17,11 @@ class RiskCheck:
     name: str
     passed: bool
     detail: str = ""
+    warn: bool = False          # failing only asks the user (Execute / Cancel); it never refuses the trade
+
+    @property
+    def blocks(self) -> bool:
+        return not self.passed and not self.warn
 
 
 def daily_pnl(trades_today_closed: list[dict], open_trades: list[dict]) -> float:
@@ -47,7 +53,7 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
     already excluding that strategy (Repository.confirmed_on(exclude_group=...)). Its other legs are then not
     counted against it, so an iron condor never blocks its own SELL legs."""
     c: list[RiskCheck] = []
-    add = lambda name, ok, detail="": c.append(RiskCheck(name, bool(ok), detail))  # noqa: E731
+    add = lambda name, ok, detail="", warn=False: c.append(RiskCheck(name, bool(ok), detail, warn))  # noqa: E731
     add("not_halted", not halted, halted or "")
     t = now.time()
     add("weekday", now.weekday() < 5, f"{now:%A}")
@@ -100,8 +106,11 @@ def pre_trade(cfg: TraderConfig, *, now: datetime, tradingsymbol: str, exchange:
     if broker_net is None:
         add("broker_position_known", False, "could not read Zerodha positions")
     else:
+        # a position opened in Kite only warns: the user decides. On Execute that quantity is kept apart from
+        # the trade (trades.outside_base), so reconciliation still sees only this trade's own quantity.
         add("no_outside_position", broker_net == 0 or bool(mine),
-            f"Zerodha already shows {broker_net} of {tradingsymbol} not opened here" if broker_net and not mine else "")
+            f"Zerodha already shows {broker_net} of {tradingsymbol} not opened here" if broker_net and not mine else "",
+            warn=True)
     if ltp is None:
         add("ltp_available", not cfg.require_ltp_for_entry, "no live price for this contract")
     elif cfg.max_entry_deviation_pct:

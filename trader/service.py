@@ -138,9 +138,10 @@ class TradeService:
                          halted=self.halted(), group_id=group_id)
 
     def preview(self, payload: dict, group_id: int | None = None, leg_role: str | None = None,
-                sl_auto: bool = False, sl_local: bool | None = None) -> dict:
+                sl_auto: bool = False, sl_local: bool | None = None, ack_warnings: bool = False) -> dict:
         """Validate + risk-check a trade and store it (DRAFT -> READY). Places nothing. Returns a single-use
-        confirm token when everything passes. group_id: the multi-leg strategy this leg belongs to (set by
+        confirm token when everything passes. A failed `warn` check (e.g. a position already open in Kite) is
+        returned in "warnings" with needs_ack=True and no token, until the user says Execute (ack_warnings). group_id: the multi-leg strategy this leg belongs to (set by
         StrategyService only, never taken from the request body); the strategy counts as one position."""
         with self.lock:
             now = self.clock()
@@ -188,16 +189,20 @@ class TradeService:
                 snap = None
                 self._broker_error("snapshot (preview)", exc)
             checks = self._risk(inst=inst, req=req, quantity=qty, ltp=ltp, snap=snap, group_id=group_id)
-            risk_failed = [c for c in checks if not c.passed]
+            risk_failed = [c for c in checks if c.blocks]
+            warnings = [c for c in checks if not c.passed and c.warn]
             self.audit(tid, "VALIDATION_FAILED" if errors else "VALIDATION_PASSED", "WARNING" if errors else "INFO",
                        {"errors": errors})
             self.audit(tid, "RISK_CHECK", "WARNING" if risk_failed else "INFO",
-                       {"checks": [vars(c) for c in checks]})
+                       {"checks": [vars(c) for c in checks], "warnings_acknowledged": bool(warnings and ack_warnings)})
             summary = self._summary(self.repo.trade(tid), ltp)
-            if errors or risk_failed:
-                self.repo.update_trade(tid, error="; ".join(errors + [f"{c.name}: {c.detail}" for c in risk_failed]))
+            if errors or risk_failed or (warnings and not ack_warnings):
+                self.repo.update_trade(tid, error="; ".join(errors + [f"{c.name}: {c.detail}" for c in risk_failed]
+                                                             + [f"{c.name}: {c.detail}" for c in warnings]))
                 return {"ok": False, "trade_id": tid, "errors": errors,
-                        "risk": [vars(c) for c in checks], "summary": summary}
+                        "risk": [vars(c) for c in checks], "summary": summary,
+                        "warnings": [c.detail for c in warnings],
+                        "needs_ack": bool(warnings) and not errors and not risk_failed}
             expires = now + timedelta(seconds=self.cfg.confirm_token_s)
             self.repo.set_status(tid, L.READY, "READY_FOR_CONFIRMATION", detail={"expires_at": expires.isoformat()})
             token = self.repo.issue_token(tid, "CONFIRM", expires)
@@ -224,7 +229,7 @@ class TradeService:
                 raise ActionError(f"cannot reach Zerodha to check positions: {exc}") from None
             checks = self._risk(inst=inst, req=req, quantity=t["quantity"], ltp=ltp, snap=snap,
                                 group_id=t.get("group_id"))
-            failed = [c for c in checks if not c.passed]
+            failed = [c for c in checks if c.blocks]      # warnings were answered (Execute) at preview
             self.audit(trade_id, "RISK_CHECK", "WARNING" if failed else "INFO",
                        {"at": "confirm", "checks": [vars(c) for c in checks]})
             if failed:
@@ -232,8 +237,10 @@ class TradeService:
                                  {"failed": [vars(c) for c in failed]},
                                  error="; ".join(f"{c.name}: {c.detail}" for c in failed))
                 raise ActionError("blocked by risk limits: " + "; ".join(f"{c.name} ({c.detail})" for c in failed))
-            if not self._transition(t, L.ENTRY_ORDER_PLACED, "ENTRY_CONFIRMED", "INFO", {"ltp": ltp},
-                                    confirmed_at=self.repo.now()):
+            base = self._outside_now(t, snap)
+            if not self._transition(t, L.ENTRY_ORDER_PLACED, "ENTRY_CONFIRMED", "INFO",
+                                    {"ltp": ltp, **({"outside_base": base} if base else {})},
+                                    confirmed_at=self.repo.now(), outside_base=base):
                 raise ActionError("trade changed while confirming; nothing was placed")
             row = self.placer.place(t, "ENTRY", t["side"], t["quantity"], "LIMIT", t["entry_price"])
             if row is None:
@@ -682,7 +689,7 @@ class TradeService:
             risk = [c for c in risk if c.name != "max_loss_per_trade"] + ([RiskCheck(
                 "max_loss_per_trade", ok,
                 f"₹{loss_new:,.0f} at the stop, limit ₹{limit:,.0f} (was ₹{loss_cur:,.0f}){hint}")] if limit else [])
-            errors += [f"{c.name}: {c.detail}" for c in risk if not c.passed]
+            errors += [f"{c.name}: {c.detail}" for c in risk if c.blocks]
         fields: dict = {}
         if "entry_price" in diff:
             fields["entry_price"] = req.entry_price
@@ -994,12 +1001,16 @@ class TradeService:
             entry = q["first_entry"]                      # all ended unfilled: decided by the leg's own order
         if q["filled"] == 0:
             if entry["status"] == "NOT_PLACED":
-                self._transition(t, L.REJECTED, "ENTRY_NOT_PLACED", "WARNING",
+                self._transition(t, L.REJECTED, "ENTRY_NOT_PLACED", "ERROR",
                                  {"detail": entry["status_message"]},
                                  error=f"entry order never reached Zerodha: {entry['status_message']}")
+                log.error("trade %s %s %s: Zerodha refused the entry order: %s", t["id"], t["side"],
+                          t["tradingsymbol"], entry["status_message"])
             elif entry["status"] == "REJECTED":
-                self._transition(t, L.REJECTED, "ENTRY_REJECTED", "WARNING", {"message": entry["status_message"]},
-                                 error=entry["status_message"])
+                self._transition(t, L.REJECTED, "ENTRY_REJECTED", "ERROR", {"message": entry["status_message"]},
+                                 error=f"Zerodha rejected the entry order: {entry['status_message']}")
+                log.error("trade %s %s %s: Zerodha rejected the entry order: %s", t["id"], t["side"],
+                          t["tradingsymbol"], entry["status_message"])
             elif entry["status"] in ("CANCELLED", "EXPIRED", "CANCELLED AMO"):
                 self._transition(t, L.CANCELLED, "ENTRY_CANCELLED", "INFO",
                                  {"by": "user" if entry["cancel_requested"] else "broker/outside",
@@ -1098,6 +1109,13 @@ class TradeService:
     def _reconcile(self, t: dict, q: dict, snap: Snapshot, now: datetime) -> str:
         expected = L.direction(t["side"]) * q["open"]
         actual = self._broker_share(t, q, snap)
+        if actual != expected and t.get("outside_base") and self._broker_share(t, q, snap, outside=False) == expected:
+            # the position that was already open in Kite has been closed there: Zerodha now shows only ours
+            self.audit(t["id"], "OUTSIDE_POSITION_CLOSED", "INFO", {"outside_base": t["outside_base"],
+                                                                   "actual": actual + t["outside_base"]})
+            self.repo.update_trade(t["id"], outside_base=0)
+            t["outside_base"] = 0
+            actual = expected
         if actual == expected:
             if t["mismatch_count"]:
                 self.audit(t["id"], "RECONCILED", "INFO", {"expected": expected, "actual": actual,
@@ -1132,15 +1150,27 @@ class TradeService:
                          error=f"Zerodha shows {actual}, expected {expected}")
         return "stop"
 
-    def _broker_share(self, t: dict, q: dict, snap: Snapshot) -> int:
+    def _outside_now(self, t: dict, snap: Snapshot) -> int:
+        """Signed quantity of t's symbol/product at Zerodha that no open trade of this app accounts for."""
+        same = [x for x in self.repo.trades(L.OPEN_STATUSES)
+                if x["id"] != t["id"] and x["exchange"] == t["exchange"] and x["tradingsymbol"] == t["tradingsymbol"]
+                and x["product"] == t["product"]]
+        return (snap.net(t["exchange"], t["tradingsymbol"], t["product"])
+                - sum(L.direction(x["side"]) * self._derive(x)["open"] + (x.get("outside_base") or 0) for x in same))
+
+    def _broker_share(self, t: dict, q: dict, snap: Snapshot, outside: bool = True) -> int:
         """This trade's part of Zerodha's net position. Several trades can hold the same symbol (lots added later,
         same side only): Zerodha shows one net quantity, which is shared out oldest trade first, each up to its
         own open quantity; the newest takes the rest, so a position added outside still shows up as a mismatch
-        and a quantity closed in Kite is taken off the newest trade first."""
+        and a quantity closed in Kite is taken off the newest trade first. A position that was already open in
+        Kite when a trade was placed (its outside_base, placed on Execute) is taken off first (outside=False: not)."""
+        allopen = [x for x in self.repo.trades(L.OPEN_STATUSES)
+                   if x["exchange"] == t["exchange"] and x["tradingsymbol"] == t["tradingsymbol"]
+                   and x["product"] == t["product"]]
         net = snap.net(t["exchange"], t["tradingsymbol"], t["product"])
-        same = [x for x in self.repo.trades(L.OPEN_STATUSES)
-                if x["id"] != t["id"] and x["exchange"] == t["exchange"] and x["tradingsymbol"] == t["tradingsymbol"]
-                and x["product"] == t["product"] and x["side"] == t["side"]]
+        if outside:
+            net -= sum((x.get("outside_base") or 0) for x in allopen if x["id"] != t["id"]) + (t.get("outside_base") or 0)
+        same = [x for x in allopen if x["id"] != t["id"] and x["side"] == t["side"]]
         if not same:
             return net
         d = L.direction(t["side"])
