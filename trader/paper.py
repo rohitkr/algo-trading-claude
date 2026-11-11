@@ -58,6 +58,8 @@ class PaperExchange:
             for p in self.net.values():                # hand-edited files may only carry qty
                 p.setdefault("buy_value", 0.0)
                 p.setdefault("sell_value", 0.0)
+                p.setdefault("buy_qty", 0)
+                p.setdefault("sell_qty", 0)
 
     def _save(self) -> None:
         if not self.state_path:
@@ -165,8 +167,12 @@ class PaperExchange:
             net = []
             for key, p in self.net.items():
                 exch, sym, prod = key.split("|")
+                # like Kite's net average_price: what the open side cost on average (0 when unknown / flat)
+                bq, sq = p.get("buy_qty") or 0, p.get("sell_qty") or 0
+                avg = (p["buy_value"] / bq if p["qty"] > 0 and bq else p["sell_value"] / sq if p["qty"] < 0 and sq else 0)
                 net.append({"exchange": exch, "tradingsymbol": sym, "product": prod, "quantity": p["qty"],
-                            "buy_value": p["buy_value"], "sell_value": p["sell_value"]})
+                            "buy_value": p["buy_value"], "sell_value": p["sell_value"],
+                            "average_price": round(avg, 4)})
             return {"net": net, "day": net}
 
     def profile(self):
@@ -254,9 +260,11 @@ class PaperExchange:
             if o["transaction_type"] == "BUY":
                 p["qty"] += q
                 p["buy_value"] += px * q
+                p["buy_qty"] = p.get("buy_qty", 0) + q
             else:
                 p["qty"] -= q
                 p["sell_value"] += px * q
+                p["sell_qty"] = p.get("sell_qty", 0) + q
             self._save()
             return q
 

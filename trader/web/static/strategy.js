@@ -1698,7 +1698,7 @@ function chartShell(st) {
   };
   svg.addEventListener("mouseup", up);
   window.addEventListener("mouseup", () => { if (st.drag && $("#ch-svg")) up(); });
-  svg.addEventListener("mouseleave", () => { if (!st.drag) ["#ch-x", "#ch-y", "#ch-yb", "#ch-yt", "#ch-dot", "#ch-tip"].forEach((q) => $(q)?.classList.add("hidden")); });
+  svg.addEventListener("mouseleave", () => { st.hover = null; if (!st.drag) ["#ch-x", "#ch-y", "#ch-yb", "#ch-yt", "#ch-dot", "#ch-tip"].forEach((q) => $(q)?.classList.add("hidden")); });
 }
 function renderChart(st, pendingDrag) {
   if (st.zx0 == null || Math.round(st.zx0) !== st.x0 || Math.round(st.zx1) !== st.x1) { st.zx0 = st.x0; st.zx1 = st.x1; }
@@ -1756,10 +1756,13 @@ function renderChart(st, pendingDrag) {
       ${stat("Day high / low", `${num(dHi)} / ${num(dLo)}`)}
       ${lvl.sl != null ? stat("To SL", sgn(lvl.sl - ltp)) : stat("SL", "none")}
       ${lvl.target != null ? stat("To target", sgn(lvl.target - ltp)) : ""}</div>`;
+  // a live tick / refresh redraws the SVG (crosshair included): put the hover back where the pointer still is
+  if (st.hover && !st.drag) hoverChart(st, st.hover, svg);
   $("#ch-foot").innerHTML = `Wheel = zoom · drag = pan · double-click = reset · drag the <span class="lv-sl">SL</span> / <span class="lv-tp">target</span> line to change it · live ticks · 1-min history from Kite`;
 }
 function hoverChart(st, p, svg) {
   const g = st.geo; if (!g) return;
+  st.hover = p;
   const c = g.c, W = CH.w - CH.l - CH.r;
   const i = Math.max(0, Math.min(c.length - 1, Math.round(((p.x - CH.l) / W) * (c.length - 1))));
   const px = g.X(i), k = c[i], d = st.d;
@@ -2217,6 +2220,107 @@ $("#strategies-list").addEventListener("click", async (ev) => {
   }
 });
 
+// ---------------------------------------------------------------- positions opened in Kite: Adopt
+// F&O positions Zerodha shows that this app didn't open (from the monitor's last sync: no extra Kite call).
+// Adopt = one click: the position becomes a one-leg strategy (entry = Zerodha's average price) with its SL where the
+// Settings say (Zerodha SL order / Local), and the usual Edit pop-up opens to set the SL and target (Enter saves).
+let OUTSIDE = [];
+const OUT_LOTS = {};                                   // lots picked per position (kept across refreshes)
+const OUT_PICK = new Set();                            // ticked to adopt together as ONE strategy (combined SL / TP)
+const outKey = (p) => `${p.exchange}|${p.tradingsymbol}|${p.product}`;
+async function refreshOutside() {
+  try { OUTSIDE = (await api("/api/positions/outside")).positions || []; } catch (e) { return; }
+  renderOutside();
+}
+function renderOutside() {
+  const list = $("#outside-list");
+  if (document.activeElement?.matches?.(".out-lots")) return;  // typing a lot count: don't redraw under the cursor
+  $("#outside-panel").classList.toggle("hidden", !OUTSIDE.length);
+  for (const k of [...OUT_PICK]) if (!OUTSIDE.some((p) => p.adoptable && outKey(p) === k)) OUT_PICK.delete(k);
+  const pickable = OUTSIDE.filter((p) => p.adoptable).map(outKey);
+  const rows = OUTSIDE.map((p) => {
+    const k = outKey(p), qty = Math.abs(p.qty);
+    const lots = Math.min(Math.max(1, Number(OUT_LOTS[k]) || p.lots || 1), p.lots || 1);
+    const name = p.underlying ? contractName(p) : esc(p.tradingsymbol);
+    const lotPick = p.adoptable && p.lots > 1
+      ? `<input type="number" class="out-lots" data-out-lots="${esc(k)}" min="1" max="${p.lots}" step="1" value="${lots}"
+          title="Lots to adopt (of ${p.lots}); the rest stays outside the app"> <small>of ${p.lots} lots</small>`
+      : p.lot_size ? `<small>${p.lots || 0} lot${p.lots === 1 ? "" : "s"}</small>` : "";
+    return `<tr><td>${p.adoptable ? `<input type="checkbox" class="out-pick" data-out-pick="${esc(k)}" ${OUT_PICK.has(k) ? "checked" : ""}
+      title="Tick several to adopt them together as one strategy (combined SL / max profit)">` : ""}</td><td><span class="bs-btn ${p.side === "BUY" ? "buy" : "sell"} chip">${p.side === "BUY" ? "B" : "S"}</span></td>
+      <td class="sym" title="${esc(p.tradingsymbol)} · ${esc(p.exchange)} ${esc(p.product)}">${name} <small>${esc(p.product)}</small></td>
+      <td class="num">${qty}</td><td class="out-lot-cell">${lotPick}</td>
+      <td class="num">${num(p.avg_price)}</td><td class="num">${num(p.ltp)}</td>
+      <td class="num ${(p.pnl || 0) >= 0 ? "pos" : "neg"}">${p.pnl == null ? "–" : money(p.pnl)}</td>
+      <td class="leg-actions">${p.adoptable
+        ? `<button type="button" class="edit-btn" data-adopt="${esc(k)}" title="Manage this position here: entry ${num(p.avg_price)} (Zerodha's average). Nothing is sent to Zerodha.">Adopt</button>`
+        : `<small class="hint">${esc(p.reason)}</small>`}</td></tr>`;
+  }).join("");
+  const all = pickable.length > 1 && pickable.every((k) => OUT_PICK.has(k));
+  const n = OUT_PICK.size;
+  const html = `<div class="leg-table-scroll"><table class="legs-live outside-table"><tr><th class="c-pick">${pickable.length > 1
+    ? `<input type="checkbox" data-out-pick-all ${all ? "checked" : ""} title="Tick every position">` : ""}</th><th class="c-side">Side</th><th class="c-sym">Contract</th>
+    <th class="num c-qty">Qty</th><th></th><th class="num c-px">Avg</th><th class="num c-px">LTP</th><th class="num c-pnl">P&amp;L</th><th></th></tr>${rows}</table></div>
+    ${pickable.length > 1 ? `<div class="out-together"><button type="button" class="primary" data-adopt-together ${n < 2 ? "disabled" : ""}
+      title="One strategy with every ticked position as a leg: then set the combined SL / max profit">Adopt ${n >= 2 ? n : ""} together as one strategy</button>
+      <small class="hint">${n < 2 ? "Tick 2 or more positions to track them as one strategy (combined SL / max profit)." : "Combined SL / max profit next; each leg keeps its own SL / target too."}</small></div>` : ""}`;
+  if (list._html !== html) { list.innerHTML = html; list._html = html; }
+}
+async function adoptPosition(k, btn) {
+  const p = OUTSIDE.find((x) => outKey(x) === k);
+  if (!p) return;
+  btn.disabled = true;
+  try {
+    const r = await api("/api/positions/adopt", {exchange: p.exchange, tradingsymbol: p.tradingsymbol, product: p.product,
+      lots: Number(OUT_LOTS[k]) || p.lots, sl_local: $("input[name=sl_mode]:checked")?.value === "LOCAL"});
+    if (!r.ok) { btn.disabled = false; return alertBox("Not adopted", r.errors || []); }
+    delete OUT_LOTS[k];
+    await Promise.all([refreshStrategies(), refreshOutside()]);
+    editLeg(r.trade_id);                                // set the SL / target now: Enter saves
+  } catch (e) { btn.disabled = false; alertBox("Not adopted", [e.message]); }
+}
+async function adoptTogether(btn) {
+  const picked = OUTSIDE.filter((p) => p.adoptable && OUT_PICK.has(outKey(p)));
+  if (picked.length < 2) return;
+  btn.disabled = true;
+  try {
+    const r = await api("/api/positions/adopt", {sl_local: $("input[name=sl_mode]:checked")?.value === "LOCAL",
+      positions: picked.map((p) => ({exchange: p.exchange, tradingsymbol: p.tradingsymbol, product: p.product,
+                                     lots: Number(OUT_LOTS[outKey(p)]) || p.lots}))});
+    if (!r.ok) { btn.disabled = false; return alertBox("Not adopted (nothing was)", r.errors || []); }
+    picked.forEach((p) => { OUT_PICK.delete(outKey(p)); delete OUT_LOTS[outKey(p)]; });
+    await Promise.all([refreshStrategies(), refreshOutside()]);
+    if ((r.errors || []).length) alertBox("Some positions were not adopted", r.errors);
+    else editExits(r.strategy_id);                     // set the combined SL / max profit now: Enter saves
+  } catch (e) { btn.disabled = false; alertBox("Not adopted", [e.message]); }
+}
+$("#outside-list").addEventListener("change", (ev) => {
+  const k = ev.target.dataset.outPick;
+  if (k) { if (ev.target.checked) OUT_PICK.add(k); else OUT_PICK.delete(k); }
+  else if (ev.target.dataset.outPickAll !== undefined) {
+    OUTSIDE.filter((p) => p.adoptable).forEach((p) => (ev.target.checked ? OUT_PICK.add(outKey(p)) : OUT_PICK.delete(outKey(p))));
+  } else return;
+  renderOutside();
+});
+$("#outside-list").addEventListener("input", (ev) => {
+  const k = ev.target.dataset.outLots;
+  if (k) OUT_LOTS[k] = ev.target.value;
+});
+$("#outside-list").addEventListener("keydown", (ev) => {        // Enter in the lots box = Adopt
+  const k = ev.target.dataset.outLots;
+  if (!k || ev.key !== "Enter") return;
+  ev.preventDefault();
+  const tog = $("[data-adopt-together]");
+  if (OUT_PICK.has(k) && OUT_PICK.size >= 2 && tog) return adoptTogether(tog);   // a ticked row: adopt the ticked ones
+  const b = $(`[data-adopt="${CSS.escape(k)}"]`);
+  if (b) adoptPosition(k, b);
+});
+$("#outside-list").addEventListener("click", (ev) => {
+  if (ev.target.dataset.adoptTogether !== undefined) return adoptTogether(ev.target);
+  const k = ev.target.dataset.adopt;
+  if (k) adoptPosition(k, ev.target);
+});
+
 // ---------------------------------------------------------------- init
 loadMeta().then(() => {
   if (STORED?.legs?.length) {
@@ -2232,10 +2336,12 @@ loadMeta().then(() => {
 // No polling: the server pushes "dashboard" when any trade/order state changes; LTP / P&L cells are patched
 // in place by live.js on every tick. The slow refresh is only a safety net.
 Live.onPrice((k, px) => { if (k === $("#base-spot").dataset.price) { SPOT = px; renderSpotChange(); } });
-Live.onDashboard(refreshStrategies);
+Live.onDashboard(() => { refreshStrategies(); refreshOutside(); });
 Live.start();
 refreshStrategies();
+refreshOutside();
 setInterval(refreshStrategies, 30000);
+setInterval(() => { if (!document.hidden) refreshOutside(); }, 4000);   // Kite-side changes don't push: cheap poll
 
 
 // -- layout: settings drawer, one-screen workspace, resizable summary rail, chart that fills its space ------------

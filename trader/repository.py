@@ -191,7 +191,10 @@ ADDED_COLUMNS = {"trades": [("user_sl", "REAL"), ("group_id", "INTEGER"), ("leg_
                             ("pending_limit_exit", "TEXT"),
                             ("sl_local", "INTEGER"),   # 1 = no SL order at Zerodha: the algo watches the stop itself   # JSON {"qty", "price"}: a limit exit to place next tick   # 1 = stop derived by the app (no SL chosen), follows entry edits
                             # signed Zerodha quantity of this symbol NOT opened here, at entry (kept apart in reconcile)
-                            ("outside_base", "INTEGER NOT NULL DEFAULT 0")],
+                            ("outside_base", "INTEGER NOT NULL DEFAULT 0"),
+                            # JSON list of Kite order ids placed by hand (not by this app) that closed some of this
+                            # trade and are already accounted for (manual-exit detection, TradeService._manual_orders)
+                            ("manual_seen", "TEXT")],
                  "action_tokens": [("payload", "TEXT")],
                  "strategies": [("pnl_base", "REAL")]}   # P&L booked before a re-entry: the strategy's own
                                                           # profit/loss/trail rules count only what comes after
@@ -435,6 +438,12 @@ class Repository:
                             list(row.values()))
             oid = int(cur.lastrowid)
         return self.order(oid)
+
+    def broker_ids(self, exchange: str, tradingsymbol: str) -> set[str]:
+        """Zerodha order ids of every order this app placed in this contract (any trade, any day)."""
+        return {r[0] for r in self.conn.execute(
+            "SELECT broker_order_id FROM orders WHERE exchange=? AND tradingsymbol=? AND broker_order_id IS NOT NULL",
+            (exchange, tradingsymbol))}
 
     def order(self, oid: int) -> dict | None:
         r = self.conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()

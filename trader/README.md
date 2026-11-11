@@ -81,10 +81,40 @@ database.
     estimated at the last LTP), and the SL order is resized.
   - **Position larger or flipped:** `UNKNOWN_REQUIRES_RECONCILIATION`. No more orders are sent for
     the trade. It resumes by itself once Kite matches again.
+- **Exits by hand in Kite are seen in the order book first.** A Kite order this app didn't place (untagged), on
+  the side that closes a trade, filled after the trade was opened or adopted here:
+  - Position already smaller or flat: that order explains it, so it is adopted at once (no
+    `TRADER_RECONCILE_CONFIRMATIONS` wait). Our resting SL is cancelled in the same tick; the P&L uses that order's
+    average price.
+  - Position not changed yet (Kite's positions lag its order book): nothing is sent for the trade (no exit, no SL
+    change) until it does, for up to 15 s (`MANUAL_ORDER_HOLD_S`), so a stop or target hit in that moment can't send a
+    second exit. Still unchanged after 15 s: the order closed something else, and the trade is managed as before.
 - **Fill after close.** If any order of a closed trade executes, you get a CRITICAL alert and new
   trades are blocked.
 - **Opening rules.** One trade per tradingsymbol is allowed, and a symbol you already hold in Kite
   can't be opened here, so each position has one owner.
+
+## Adopting a position opened in Kite
+
+The strategy page lists every F&O position (NFO, BFO, MCX; never cash) that Zerodha shows but this app didn't open,
+from the monitor's last sync (no extra Kite call), under "Open in Zerodha, not managed here".
+
+- **Adopt** (one click; Enter in the lots box does the same) turns it into a one-leg strategy: entry = Zerodha's
+  average price, quantity = all of it or the lots you pick. Nothing is sent to Zerodha. The Edit pop-up then opens to
+  set the SL and target (Enter saves); after that it's managed like any leg (SL, target, Add, Exit, partial exit).
+- **Several together (combined SL / max profit):** tick 2 or more positions (or the header box for all) and press
+  "Adopt N together as one strategy". They become ONE strategy with a leg each, e.g. a SENSEX condor opened in Kite.
+  The combined-exit pop-up opens next (Enter saves): its combined SL / max profit square off every leg at once, and
+  each leg can still have its own SL / target. All-or-nothing: if any ticked position can't be adopted, none is.
+- **SL type** follows the page's Settings (Zerodha SL order or Local). MIS stays MIS (squared off as usual); NRML is
+  carried like BTST (no app square-off), since it was opened in Kite to be held.
+- **Part of a position:** the lots not adopted stay outside the app (`trades.outside_base`) and stay listed. If Zerodha's
+  position later shrinks, it comes off that outside part first, while Zerodha still holds all of the adopted lots, so
+  the adopted trade keeps its quantity and SL.
+- **Exit by hand in Kite** closes the adopted trade and cancels its SL, as for any trade (see "Order safety").
+  Lots added by hand afterwards make Zerodha's position larger than the trade: like any trade, it is set to
+  `UNKNOWN_REQUIRES_RECONCILIATION` and nothing more is sent for it.
+- **Only options** in the app's instrument list can be adopted. Futures are listed but can't be adopted.
 
 ## Stop-loss, target, trailing and partial booking
 

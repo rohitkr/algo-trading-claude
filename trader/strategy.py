@@ -323,6 +323,57 @@ class StrategyService:
                            {"strategy_id": s["id"], "from_leg": trade_id, "reopened": s["status"] != "ACTIVE"})
             return {"ok": True, "trade_id": p["trade_id"], "strategy_id": s["id"]}
 
+    # -- adopt a position opened in Kite ----------------------------------------------------------------
+    def adopt(self, payload: dict) -> dict:
+        """Positions opened in Kite become ONE strategy here (TradeService.adopt_position), one leg each: shown on the
+        page with Edit (SL / target), Add and Exit per leg, and the strategy's combined SL / max profit across all of
+        them. payload: {"positions": [{exchange, tradingsymbol, product, lots?}, ...]} (or one position's fields at
+        the top level). All-or-nothing: every position is checked before any is adopted. SL type: the page's setting."""
+        with self.svc.lock:
+            items = payload.get("positions") or [payload]
+            if not items or len(items) > 12:
+                return {"ok": False, "errors": ["pick 1 to 12 positions to adopt"]}
+            sl_local = payload.get("sl_local")
+            sl_local = self.svc.cfg.sl_local_default if sl_local in (None, "") else _flag(sl_local)
+            pos, labels, unders, errors = [], [], set(), []
+            for p in items:
+                exch, sym = str(p.get("exchange") or ""), str(p.get("tradingsymbol") or "")
+                product, lots = str(p.get("product") or ""), p.get("lots")
+                key = (exch, sym, product)
+                if key in [x[:3] for x in pos]:
+                    errors.append(f"{sym}: picked twice")
+                    continue
+                try:
+                    lots = int(lots) if lots not in (None, "") else None
+                    self.svc.adopt_position(exch, sym, product, lots, sl_local=sl_local, dry_run=True)
+                    inst = self.svc.instruments.by_symbol(exch, sym)
+                except (ActionError, ValueError) as exc:
+                    errors.append(f"{sym}: {exc}")
+                    continue
+                pos.append((exch, sym, product, lots))
+                unders.add(inst.name)
+                labels.append(f"{inst.strike:g} {'CE' if inst.right == 'CALL' else 'PE'}")
+            if errors:
+                return {"ok": False, "errors": errors}      # nothing adopted
+            name = (f"Adopted {next(iter(unders))} {labels[0]}" if len(pos) == 1 else
+                    f"Adopted {'/'.join(sorted(unders))} {len(pos)} legs ({', '.join(labels)})")
+            products = {x[2] for x in pos}
+            cfg = GlobalConfig(name=name[:120], order_type="MIS" if products == {"MIS"} else "BTST", sl_local=sl_local)
+            sid = self.repo.insert_strategy(dict(mode=self.svc.cfg.mode, name=cfg.name, config=json.dumps(cfg.to_json())))
+            tids = []
+            try:
+                for exch, sym, product, lots in pos:
+                    res = self.svc.adopt_position(exch, sym, product, lots, sl_local=sl_local, group_id=sid, tick=False)
+                    tids.append(res["trade_id"])
+            except (ActionError, ValueError) as exc:
+                if not tids:
+                    self.repo.discard_strategy(sid)
+                    return {"ok": False, "errors": [str(exc)]}
+                # changed between the check and the adopt (rare): keep what was adopted, say what wasn't
+                errors.append(f"{sym}: {exc}")
+            self.svc._tick_locked()
+            return {"ok": True, "strategy_id": sid, "trade_id": tids[0], "trade_ids": tids, "errors": errors}
+
     def _not_placed(self, trade_id: int, reason: str) -> None:
         """A READY leg that will never be sent: EXPIRED with the reason, kept on the strategy so it shows."""
         t = self.repo.trade(trade_id)

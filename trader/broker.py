@@ -111,6 +111,8 @@ class Snapshot:
     # PaperExchange.positions() has no such field, so this is always empty in PAPER: callers fall back to
     # Breeze automatically by treating a missing key as "no Kite price".
     last_price: dict[tuple[str, str, str], float] = field(default_factory=dict)
+    # Kite's net average_price per position: the entry price of a position adopted from Kite (Adopt), display
+    avg_price: dict[tuple[str, str, str], float] = field(default_factory=dict)
 
     def __post_init__(self):
         self.by_id = {o.order_id: o for o in self.orders}
@@ -126,6 +128,9 @@ class Snapshot:
 
     def kite_ltp(self, exchange: str, tradingsymbol: str, product: str) -> float | None:
         return self.last_price.get((exchange, tradingsymbol, product))
+
+    def average(self, exchange: str, tradingsymbol: str, product: str) -> float | None:
+        return self.avg_price.get((exchange, tradingsymbol, product))
 
 
 class KiteTraderBroker:
@@ -183,13 +188,17 @@ class KiteTraderBroker:
             orders.append(b)
         pos: dict[tuple, int] = {}
         last_price: dict[tuple, float] = {}
+        avg_price: dict[tuple, float] = {}
         for p in (self.kite.positions() or {}).get("net", []):
             k = (p.get("exchange", ""), p.get("tradingsymbol", ""), p.get("product", ""))
             pos[k] = pos.get(k, 0) + int(p.get("quantity") or 0) * self._units_of(k[0], k[1])
             lp = p.get("last_price")           # absent on PaperExchange; present (free) on real Kite
             if lp not in (None, "", 0):
                 last_price[k] = float(lp)
-        return Snapshot(orders, pos, now, last_price=last_price)
+            ap = p.get("average_price")
+            if ap not in (None, "", 0):
+                avg_price[k] = float(ap)
+        return Snapshot(orders, pos, now, last_price=last_price, avg_price=avg_price)
 
     def ping(self) -> str:
         prof = self.kite.profile() or {}

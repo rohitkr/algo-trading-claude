@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta
 from zerodha.orders import round_to_tick
 
 from . import lifecycle as L
-from .broker import LOCAL_PENDING, KiteTraderBroker, Snapshot, is_terminal, is_working
+from .broker import LOCAL_PENDING, BrokerOrder, KiteTraderBroker, Snapshot, is_terminal, is_working
 from .config import TraderConfig, exchange_for
 from .instruments import InstrumentService
 from .orders import OrderPlacer
@@ -42,6 +42,20 @@ LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNI
 
 class ActionError(RuntimeError):
     pass
+
+
+FNO_EXCHANGES = ("NFO", "BFO", "MCX")
+# An order placed by hand in Kite that closes (part of) a trade shows in Zerodha's order book a moment before its
+# net position changes. For up to this long nothing is sent for that trade while the position catches up, so an
+# exit by hand and one by this app can't both go out (double exit -> a flipped position).
+MANUAL_ORDER_HOLD_S = 15.0
+
+
+def _ts(v) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(v)[:19]) if v else None
+    except ValueError:
+        return None
 
 
 def _num_or_none(v):
@@ -77,6 +91,8 @@ class TradeService:
         # StrategyService.tick for multi-leg combined-P&L rules. Optional; never required by TradeService.
         self.extra_tick = extra_tick
         self._resync = False
+        self.last_snapshot: Snapshot | None = None   # the last tick's Zerodha view (page reads: outside positions)
+        self._manual_held: dict[int, set] = {}        # trade id -> Kite order ids it is waiting on (audited once)
 
     # -- audit -------------------------------------------------------------------------------------
     def audit(self, trade_id: int | None, event: str, level: str = "INFO", detail: dict | None = None) -> None:
@@ -745,6 +761,148 @@ class TradeService:
                        {"changes": {k: [t.get(k), v] for k, v in upd.items()}, "detail": "taken from the Zerodha order"})
             t.update(self.repo.trade(t["id"]))
 
+    # -- positions opened in Kite (not by this app): list + adopt ------------------------------------------
+    def _unmanaged(self, key: tuple, net: int, trades: list[dict], opens: dict | None = None) -> int:
+        """Signed quantity of Zerodha's net position `key` that no open trade of this app holds."""
+        mine = [x for x in trades if (x["exchange"], x["tradingsymbol"], x["product"]) == key]
+        return net - sum(L.direction(x["side"]) * (opens[x["id"]] if opens else (x["open_qty"] or 0)) for x in mine)
+
+    def _outside_avg(self, snap: Snapshot, key: tuple, net: int, free: int, trades: list[dict]) -> float | None:
+        """Average price of the unmanaged part: Kite's net average, less what this app's own trades hold of it."""
+        avg = snap.average(*key)
+        if not avg or free == net:
+            return avg
+        mine = [x for x in trades if (x["exchange"], x["tradingsymbol"], x["product"]) == key]
+        rest = avg * net - sum(L.direction(x["side"]) * (x["open_qty"] or 0) * (x["entry_avg_price"] or avg) for x in mine)
+        est = rest / free if free else None
+        return round(est, 2) if est and est > 0 else avg
+
+    def outside_positions(self) -> list[dict]:
+        """F&O positions (NFO / BFO / MCX; never cash) Zerodha shows that this app did not open, from the last
+        tick's snapshot - no Kite call. `qty` is signed (+ long, - short)."""
+        snap = self.last_snapshot
+        if snap is None:
+            return []
+        trades = self.repo.trades(L.OPEN_STATUSES)
+        out = []
+        for key, net in sorted(snap.positions.items()):
+            exch, sym, prod = key
+            if exch not in FNO_EXCHANGES or not net:
+                continue
+            free = self._unmanaged(key, net, trades)
+            if not free:
+                continue
+            row = {"exchange": exch, "tradingsymbol": sym, "product": prod, "qty": free,
+                   "side": "BUY" if free > 0 else "SELL", "avg_price": self._outside_avg(snap, key, net, free, trades),
+                   "ltp": snap.kite_ltp(*key), "adoptable": True, "reason": ""}
+            try:
+                inst = self.instruments.by_symbol(exch, sym)
+            except Exception:                           # noqa: BLE001 - a future, or not in our instrument list
+                inst = None
+            if inst is None:
+                row.update(adoptable=False, reason="only options can be adopted (futures and contracts outside "
+                                                   "the app's instrument list can't)")
+            else:
+                row.update(underlying=inst.name, expiry=inst.expiry.isoformat(), strike=inst.strike,
+                           option_type={"CALL": "CE", "PUT": "PE"}.get(inst.right, inst.right),
+                           lot_size=inst.lot_size, tick_size=inst.tick_size, lots=abs(free) // inst.lot_size)
+                if row["ltp"] is None:
+                    row["ltp"] = self._ltp_safe(inst, max_age=self.cfg.quote_slow_s)
+                if row["lots"] < 1:
+                    row.update(adoptable=False, reason=f"{abs(free)} is less than one lot ({inst.lot_size})")
+                elif any(x["side"] != row["side"] for x in trades
+                         if (x["exchange"], x["tradingsymbol"], x["product"]) == key):
+                    row.update(adoptable=False, reason="this app holds the opposite side of this contract")
+            if row["avg_price"] and row["ltp"]:
+                row["pnl"] = round((row["ltp"] - row["avg_price"]) * free, 2) + 0.0     # no "-0"
+            out.append(row)
+        return out
+
+    def adopt_position(self, exchange: str, tradingsymbol: str, product: str, lots: int | None = None,
+                       sl_local: bool | None = None, group_id: int | None = None, dry_run: bool = False,
+                       tick: bool = True) -> dict:
+        """Take a position opened in Kite under this app: it becomes an ordinary trade (entry = Zerodha's average
+        price, quantity = all of it or `lots` of it) that the app then manages like its own - SL (an order at Zerodha
+        or local, per sl_local), target, exits, manual-exit detection. Nothing is sent to Zerodha here; there is no
+        stop-loss until you set one (Edit). The part not adopted stays outside (trades.outside_base)."""
+        with self.lock:
+            now = self.clock()
+            if exchange not in FNO_EXCHANGES:
+                raise ActionError("only F&O positions (NFO, BFO, MCX) can be adopted")
+            try:
+                inst = self.instruments.by_symbol(exchange, tradingsymbol)
+            except Exception:                           # noqa: BLE001
+                raise ActionError(f"{tradingsymbol}: only options in the app's {exchange} instrument list can be "
+                                  "adopted") from None
+            try:
+                snap = self.broker.snapshot(now)
+            except Exception as exc:
+                self._broker_error("snapshot (adopt)", exc)
+                raise ActionError(f"cannot reach Zerodha to read the position: {exc}") from None
+            key = (exchange, tradingsymbol, product)
+            net = snap.net(*key)
+            trades = self.repo.trades(L.OPEN_STATUSES)
+            others = [x for x in trades if (x["exchange"], x["tradingsymbol"], x["product"]) == key]
+            if any(self._derive(x)["uncertain"] for x in others):
+                raise ActionError("an order of this contract is still being confirmed with Zerodha: retry in a moment")
+            free = self._unmanaged(key, net, trades, {x["id"]: self._derive(x)["open"] for x in others})
+            if not free:
+                raise ActionError(f"Zerodha shows no {tradingsymbol} ({product}) position that this app doesn't "
+                                  "already manage")
+            side = "BUY" if free > 0 else "SELL"
+            if any(x["side"] != side for x in others):
+                raise ActionError(f"this app already holds the opposite side of {tradingsymbol}: can't adopt")
+            most = abs(free) // inst.lot_size
+            if most < 1:
+                raise ActionError(f"{abs(free)} is less than one lot ({inst.lot_size}) of {tradingsymbol}")
+            lots = most if lots in (None, "", 0) else int(lots)
+            if not 1 <= lots <= most:
+                raise ActionError(f"lots must be 1 to {most} (Zerodha shows {abs(free)} = {most} lot(s) not managed here)")
+            qty = lots * inst.lot_size
+            avg = self._outside_avg(snap, key, net, free, trades)
+            if not avg or avg <= 0:
+                raise ActionError("Zerodha did not give this position's average price: try again in a moment")
+            if dry_run:                                  # checks only (several positions adopted all-or-nothing)
+                return {"ok": True, "side": side, "qty": qty, "lots": lots, "avg_price": avg}
+            # Zerodha's position = this app's trades + the outside part (outside_base). The adopted quantity comes off
+            # an outside part another trade of this contract was carrying first; what is left outside stays apart.
+            signed, left = L.direction(side) * qty, L.direction(side) * qty
+            for x in others:
+                b = x.get("outside_base") or 0
+                if left and b and (b > 0) == (left > 0):
+                    take = min(abs(b), abs(left)) * (1 if b > 0 else -1)
+                    self.repo.update_trade(x["id"], outside_base=b - take)
+                    x["outside_base"] = b - take
+                    left -= take
+            base = free - signed - sum((x.get("outside_base") or 0) for x in others)
+            sl_local = bool(self.cfg.sl_local_default if sl_local is None else sl_local)
+            stamp = self.repo.now()
+            tid = self.repo.insert_trade(dict(
+                mode=self.cfg.mode, trade_date=now.date().isoformat(), underlying=inst.name, exchange=exchange,
+                tradingsymbol=tradingsymbol, expiry=inst.expiry.isoformat(), strike=inst.strike,
+                option_type={"CALL": "CE", "PUT": "PE"}[inst.right], side=side, product=product,
+                # NRML carries overnight like BTST (no app square-off; it was opened in Kite to be held): MIS stays
+                # intraday (Zerodha squares MIS off anyway)
+                order_type="MIS" if product == "MIS" else "BTST",
+                lot_size=inst.lot_size, tick_size=inst.tick_size, lots=lots, quantity=qty,
+                entry_price=round(avg, 2), entry_avg_price=avg, entry_time=stamp, filled_qty=qty, open_qty=qty,
+                position_status="OPEN", initial_sl=None, current_sl=None, target=None, group_id=group_id,
+                sl_local=int(sl_local), outside_base=base, status=L.ENTRY_EXECUTED))
+            # The fill this trade is made of: a COMPLETE entry row with no Zerodha order of ours behind it
+            self.repo.insert_order({"trade_id": tid, "tag": self.repo.new_tag(tid, "ENTRY"), "kind": "ENTRY",
+                                    "purpose": "ADOPTED", "exchange": exchange, "tradingsymbol": tradingsymbol,
+                                    "product": product, "side": side, "order_type": "LIMIT", "quantity": qty,
+                                    "price": round(avg, 2), "status": "COMPLETE", "filled_qty": qty, "avg_price": avg,
+                                    "status_message": "position adopted from Zerodha", "placed_at": stamp})
+            self.audit(tid, "POSITION_ADOPTED", "WARNING",
+                       {"tradingsymbol": tradingsymbol, "product": product, "side": side, "qty": qty, "lots": lots,
+                        "avg_price": avg, "zerodha_net": net, "left_outside": base,
+                        "sl": "local (algo)" if sl_local else "Zerodha SL order",
+                        "detail": "no order sent; no stop-loss until one is set"})
+            if tick:
+                self._tick_locked()
+            return {"ok": True, "trade_id": tid, "trade": self.trade_view(tid)}
+
     # -- monitor ------------------------------------------------------------------------------------
     def startup(self) -> dict:
         with self.lock:
@@ -906,6 +1064,7 @@ class TradeService:
         self.repo.set_status_value("reconciliation", {"at": now.isoformat(timespec="seconds"),
                                                       "pending_mismatches": mismatches,
                                                       "needs_attention": len(self.repo.trades([L.ERROR, L.UNKNOWN]))})
+        self.last_snapshot = snap          # set last: the page then never sees our own new fill as "not managed"
         return {"ok": True, "changed_orders": len(changed)}
 
     def _broker_error(self, what: str, exc: Exception) -> None:
@@ -1109,35 +1268,64 @@ class TradeService:
     def _reconcile(self, t: dict, q: dict, snap: Snapshot, now: datetime) -> str:
         expected = L.direction(t["side"]) * q["open"]
         actual = self._broker_share(t, q, snap)
-        if actual != expected and t.get("outside_base") and self._broker_share(t, q, snap, outside=False) == expected:
-            # the position that was already open in Kite has been closed there: Zerodha now shows only ours
-            self.audit(t["id"], "OUTSIDE_POSITION_CLOSED", "INFO", {"outside_base": t["outside_base"],
-                                                                   "actual": actual + t["outside_base"]})
-            self.repo.update_trade(t["id"], outside_base=0)
-            t["outside_base"] = 0
-            actual = expected
+        manual = self._manual_orders(t, snap)
+        base = t.get("outside_base") or 0
+        if actual != expected and base:
+            raw = self._broker_share(t, q, snap, outside=False)     # ours + the outside part, as Zerodha shows it
+            d, held = L.direction(t["side"]), raw * L.direction(t["side"])
+            sure = bool(manual) or t["mismatch_count"] + 1 >= self.cfg.reconcile_confirmations
+            if raw == expected:
+                # the position that was already open in Kite has been closed there: Zerodha now shows only ours
+                self.audit(t["id"], "OUTSIDE_POSITION_CLOSED", "INFO", {"outside_base": base, "actual": raw})
+                self.repo.update_trade(t["id"], outside_base=0)
+                t["outside_base"], actual = 0, expected
+                self._mark_manual_seen(t, manual)
+                manual = []
+            elif base * d > 0 and q["open"] < held < q["open"] + base * d and sure:
+                # Part of the outside position was closed in Kite. A smaller Zerodha position is taken off the
+                # outside part first: this trade keeps its quantity and SL while Zerodha still holds all of it.
+                self.audit(t["id"], "OUTSIDE_POSITION_REDUCED", "INFO", {"outside_base": base, "now": raw - expected,
+                                                                        "kite_orders": [o.order_id for o in manual]})
+                self.repo.update_trade(t["id"], outside_base=raw - expected)
+                t["outside_base"], actual = raw - expected, expected
+                self._mark_manual_seen(t, manual)
+                manual = []
+            elif base * d > 0 and 0 <= held < q["open"] and sure:
+                # the outside part is gone and this trade is smaller too: decided below, on what Zerodha holds
+                self.audit(t["id"], "OUTSIDE_POSITION_CLOSED", "INFO", {"outside_base": base, "actual": raw})
+                self.repo.update_trade(t["id"], outside_base=0)
+                t["outside_base"], actual = 0, raw
         if actual == expected:
             if t["mismatch_count"]:
                 self.audit(t["id"], "RECONCILED", "INFO", {"expected": expected, "actual": actual,
                                                            "detail": "mismatch cleared (broker position lag)"})
                 self.repo.update_trade(t["id"], mismatch_count=0, reconcile_info=None)
                 t["mismatch_count"] = 0
+            if manual:
+                return self._hold_for_manual(t, manual, now)
+            self._manual_held.pop(t["id"], None)
             return "ok"
+        d = L.direction(t["side"])
+        # An order placed by hand in Kite explains the smaller position: no need to wait out position lag.
+        by_hand = bool(manual) and actual * d >= 0 and abs(actual) < q["open"]
         n = t["mismatch_count"] + 1
         info = {"at": now.isoformat(timespec="seconds"), "expected": expected, "actual": actual, "checks": n}
+        if by_hand:
+            info["kite_orders"] = [o.order_id for o in manual]
         self.repo.update_trade(t["id"], mismatch_count=n, reconcile_info=json.dumps(info))
         t["mismatch_count"] = n
-        if n < self.cfg.reconcile_confirmations:
+        if n < self.cfg.reconcile_confirmations and not by_hand:
             self.audit(t["id"], "RECONCILE_MISMATCH", "WARNING", {**info, "action": "no orders until confirmed"})
             return "stop"
-        d = L.direction(t["side"])
+        self._manual_held.pop(t["id"], None)
         if actual == 0:
-            self._manual_exit(t, q, now, info)
+            self._manual_exit(t, q, now, info, manual)
             return "stop"
         if actual * d > 0 and abs(actual) < q["open"]:
             gone = q["open"] - abs(actual)
-            ltp = t["last_ltp"] or q["entry_avg"]
+            ltp = self._manual_price(manual) or t["last_ltp"] or q["entry_avg"]
             est = d * gone * (ltp - q["entry_avg"])
+            self._mark_manual_seen(t, manual)
             self.repo.update_trade(t["id"], outside_qty=(t["outside_qty"] or 0) + gone,
                                    outside_pnl=round((t["outside_pnl"] or 0) + est, 2), mismatch_count=0)
             t.update(self.repo.trade(t["id"]))
@@ -1183,7 +1371,64 @@ class TradeService:
             left = min(max(left, 0), q["open"])
         return left * d
 
-    def _manual_exit(self, t: dict, q: dict, now: datetime, info: dict) -> None:
+    def _manual_orders(self, t: dict, snap: Snapshot) -> list[BrokerOrder]:
+        """Today's fills of orders placed by hand in Kite (not by this app) on t's contract and product, on the side
+        that closes t, since t was opened here (or adopted), not yet accounted for (trades.manual_seen)."""
+        since = _ts(t.get("confirmed_at") or t.get("entry_time"))
+        side = L.exit_side(t["side"])
+        cands = [o for o in snap.orders if o.exchange == t["exchange"] and o.tradingsymbol == t["tradingsymbol"]
+                 and o.product == t["product"] and o.side == side and o.filled_qty > 0]
+        if not cands:
+            return []
+        ours = self.repo.broker_ids(t["exchange"], t["tradingsymbol"])
+        seen = set(json.loads(t.get("manual_seen") or "[]"))
+        mine = f"mt{self.repo.tag_salt}"
+        out = []
+        for o in cands:
+            if o.order_id in ours or o.order_id in seen or (o.tag or "").startswith(mine) \
+                    or any(str(x).startswith(mine) for x in o.tags):
+                continue
+            ts = _ts(o.ts)
+            if since and ts and ts < since:
+                continue                  # before this trade existed here: not a close of it
+            out.append(o)
+        return out
+
+    @staticmethod
+    def _manual_price(manual: list[BrokerOrder]) -> float | None:
+        q = sum(o.filled_qty for o in manual)
+        v = sum(o.filled_qty * o.avg_price for o in manual if o.avg_price)
+        return round(v / q, 2) if q and v else None
+
+    def _mark_manual_seen(self, t: dict, manual: list[BrokerOrder]) -> None:
+        if not manual:
+            return
+        seen = json.loads(t.get("manual_seen") or "[]")
+        seen = (seen + [o.order_id for o in manual if o.order_id not in seen])[-100:]
+        self.repo.update_trade(t["id"], manual_seen=json.dumps(seen))
+        t["manual_seen"] = json.dumps(seen)
+
+    def _hold_for_manual(self, t: dict, manual: list[BrokerOrder], now: datetime) -> str:
+        """Zerodha's order book shows a fill placed by hand that closes t, but its net position hasn't moved yet:
+        send nothing for t (no SL change, no exit) until it does, at most MANUAL_ORDER_HOLD_S. Still unchanged after
+        that: the order closed something else (e.g. the part of a Kite position that wasn't adopted)."""
+        ages = [(now - ts).total_seconds() for ts in (_ts(o.ts) for o in manual) if ts]
+        if ages and min(ages) < MANUAL_ORDER_HOLD_S:
+            ids = {o.order_id for o in manual}
+            if not ids <= self._manual_held.get(t["id"], set()):
+                self._manual_held[t["id"]] = self._manual_held.get(t["id"], set()) | ids
+                self.audit(t["id"], "MANUAL_ORDER_SEEN", "WARNING",
+                           {"kite_orders": sorted(ids), "filled": sum(o.filled_qty for o in manual),
+                            "action": "nothing sent for this trade until Zerodha's position shows it"})
+            return "stop"
+        self._manual_held.pop(t["id"], None)
+        self._mark_manual_seen(t, manual)
+        self.audit(t["id"], "MANUAL_ORDER_NOT_THIS_TRADE", "INFO",
+                   {"kite_orders": [o.order_id for o in manual],
+                    "detail": "Zerodha's position did not change for this trade: managing it as before"})
+        return "ok"
+
+    def _manual_exit(self, t: dict, q: dict, now: datetime, info: dict, manual: list | None = None) -> None:
         # Cancel OUR resting orders (a leftover SL would open a new position), place nothing else.
         cancelled = []
         for o in q["orders"]:
@@ -1191,7 +1436,8 @@ class TradeService:
                 self.placer.cancel(o, "position closed outside this system")
                 cancelled.append(o["broker_order_id"])
         self._resync = True               # see the cancels confirmed in this tick
-        ltp = t["last_ltp"]
+        self._mark_manual_seen(t, manual or [])
+        ltp = self._manual_price(manual or []) or t["last_ltp"]
         est = L.direction(t["side"]) * q["open"] * (ltp - q["entry_avg"]) if ltp and q["entry_avg"] else 0.0
         self._transition(t, L.MANUALLY_EXITED, "MANUAL_EXIT_DETECTED", "CRITICAL",
                          {**info, "cancelled_our_orders": cancelled, "pnl_estimated_at": ltp,

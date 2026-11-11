@@ -101,6 +101,14 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                     finally:
                         if rs.repo is not svc.repo:
                             rs.repo.close()
+                if u.path == "/api/positions/outside":     # last tick's snapshot: no Kite call, no trading lock
+                    rs = svc.reader()
+                    try:
+                        return self._json(200, {"positions": rs.outside_positions(),
+                                                "synced": svc.last_snapshot is not None})
+                    finally:
+                        if rs.repo is not svc.repo:
+                            rs.repo.close()
                 if u.path in ("/api/dashboard", "/api/strategies", "/api/events") or re.fullmatch(
                         r"/api/(strategies|trades)/\d+", u.path):
                     return self._read_view(u.path)          # never waits for the trading lock
@@ -287,6 +295,8 @@ def make_server(app, port: int) -> ThreadingHTTPServer:
                         return self._json(400, {"error": str(exc)})
                 if u.path == "/api/strategies/margin":
                     return self._json(200, app.strategies.margin(body))
+                if u.path == "/api/positions/adopt":
+                    return self._json(200, app.strategies.adopt(body))
                 if u.path == "/api/strategies/trade_all":
                     return self._json(200, app.strategies.create_and_trade(body))
                 m = re.fullmatch(r"/api/strategies/legs/(\d+)/add", u.path)
