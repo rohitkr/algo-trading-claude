@@ -145,6 +145,14 @@ class KiteStream:
             elif self.connected and not self._fresh():
                 self.stale_rebuilds += 1
                 self._rebuild(token, f"no message for {self.monotonic() - (self.last_message_at or 0):.0f}s")
+            elif not self.connected and self._silent_for() > max(60.0, 6 * self.stale_s):
+                # down and silent for long (KiteTicker's own reconnects not getting anywhere): start afresh
+                self.stale_rebuilds += 1
+                self._rebuild(token, f"disconnected, no message for {self._silent_for():.0f}s")
+
+    def _silent_for(self) -> float:
+        since = self.last_message_at if self.last_message_at is not None else self.connected_at
+        return self.monotonic() - since if since is not None else 0.0
 
     def _rebuild(self, token: str, why: str) -> None:
         old = self._transport
@@ -225,7 +233,18 @@ class KiteStream:
             return self._refs.get(int(token), 0)
 
     # -- transport callbacks (reactor thread) ------------------------------------------------------
-    def on_connect(self) -> None:
+    # `src` = the transport the callback came from. A replaced connection can still call back late (its "closed"
+    # arrives after the new one connected): that must not touch the live connection's state. 2026-11-11 13:18 one
+    # such late on_close marked the new, working feed as disconnected for an hour: prices fell back to REST.
+    def _stale_src(self, src) -> bool:
+        if src is None or src is self._transport:
+            return False
+        log.debug("ignoring a callback from a replaced Kite ticker connection")
+        return True
+
+    def on_connect(self, src=None) -> None:
+        if self._stale_src(src):
+            return
         with self._lock:
             self.connected, self._dead = True, False
             self.connects += 1
@@ -239,10 +258,14 @@ class KiteStream:
             except Exception as exc:
                 self._note_error(f"resubscribe: {type(exc).__name__}: {exc}")
 
-    def on_message(self) -> None:                 # every frame, heartbeats included
+    def on_message(self, src=None) -> None:       # every frame, heartbeats included
+        if self._stale_src(src):
+            return
         self.last_message_at = self.monotonic()
 
-    def on_ticks(self, ticks: Iterable[tuple[int, float]]) -> None:
+    def on_ticks(self, ticks: Iterable[tuple[int, float]], src=None) -> None:
+        if self._stale_src(src):
+            return
         now_m, now_w = self.monotonic(), self.clock()
         batch: dict[int, float] = {}
         with self._lock:
@@ -258,23 +281,31 @@ class KiteStream:
         if batch:
             self._notify(listeners, batch)
 
-    def on_close(self, code=None, reason=None) -> None:
+    def on_close(self, code=None, reason=None, src=None) -> None:
+        if self._stale_src(src):
+            return
         with self._lock:
             self.connected = False
         if _is_auth_failure(code, reason):
             self._auth_failed(code, reason)
 
-    def on_error(self, code=None, reason=None) -> None:
+    def on_error(self, code=None, reason=None, src=None) -> None:
+        if self._stale_src(src):
+            return
         self._note_error(f"{code}: {reason}")
         if _is_auth_failure(code, reason):
             self._auth_failed(code, reason)
 
-    def on_reconnect(self, attempts: int) -> None:
+    def on_reconnect(self, attempts: int, src=None) -> None:
+        if self._stale_src(src):
+            return
         with self._lock:
             self.connected = False
             self.reconnects += 1
 
-    def on_noreconnect(self) -> None:
+    def on_noreconnect(self, src=None) -> None:
+        if self._stale_src(src):
+            return
         with self._lock:
             self.connected, self._dead = False, True
         log.error("Kite ticker gave up reconnecting; the watchdog will rebuild it")
@@ -402,14 +433,15 @@ class KiteTickerTransport:
         from kiteconnect import KiteTicker
         kt = KiteTicker(api_key, access_token, reconnect=True, reconnect_max_tries=reconnect_max_tries,
                         reconnect_max_delay=reconnect_max_delay)
-        kt.on_connect = lambda ws, resp: sink.on_connect()
-        kt.on_message = lambda ws, payload, is_binary: sink.on_message()
+        # every callback says which connection it is from: the stream ignores ones from a connection it replaced
+        kt.on_connect = lambda ws, resp: sink.on_connect(src=self)
+        kt.on_message = lambda ws, payload, is_binary: sink.on_message(src=self)
         kt.on_ticks = lambda ws, ticks: sink.on_ticks(
-            (t["instrument_token"], t.get("last_price")) for t in ticks if "instrument_token" in t)
-        kt.on_close = lambda ws, code, reason: sink.on_close(code, reason)
-        kt.on_error = lambda ws, code, reason: sink.on_error(code, reason)
-        kt.on_reconnect = lambda ws, n: sink.on_reconnect(n)
-        kt.on_noreconnect = lambda ws: sink.on_noreconnect()
+            [(t["instrument_token"], t.get("last_price")) for t in ticks if "instrument_token" in t], src=self)
+        kt.on_close = lambda ws, code, reason: sink.on_close(code, reason, src=self)
+        kt.on_error = lambda ws, code, reason: sink.on_error(code, reason, src=self)
+        kt.on_reconnect = lambda ws, n: sink.on_reconnect(n, src=self)
+        kt.on_noreconnect = lambda ws: sink.on_noreconnect(src=self)
         self.kt = kt
 
     @staticmethod

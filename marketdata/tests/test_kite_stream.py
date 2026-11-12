@@ -375,3 +375,36 @@ def test_candles_frame_drops_out_of_session_and_insane_rows():
             {**_bar(datetime(2026, 9, 29, 9, 16), 5), "low": 9}]
     df = candles_frame(rows, d, time(9, 15), time(15, 29))
     assert list(df["close"]) == [2.0, 3.0]
+
+
+def test_late_close_from_a_replaced_connection_does_not_break_the_new_one():
+    """2026-11-11 13:18: the watchdog rebuilt a stalled ticker, the new one connected, then the OLD one's close
+    arrived and marked the feed disconnected for an hour (prices on REST, never rebuilt). Now it is ignored."""
+    e = Env(stale_s=10).up()
+    s = e.stream
+    s.acquire([101])
+    old = e.t
+    e.clock.t += 11                                   # stalled -> rebuilt
+    s.check()
+    new = e.t
+    assert new is not old and old.closed
+    s.on_connect(src=new)
+    s.on_close(1006, "closing handshake timeout", src=old)          # late, from the replaced connection
+    s.on_error(1006, "closing handshake timeout", src=old)
+    s.on_reconnect(1, src=old)
+    s.on_ticks([(101, 50.0)], src=new)
+    assert s.connected and s.healthy() and s.ltp(101) == 50.0 and e.rest_calls == []
+    s.on_close(1006, "really closed", src=new)        # the live connection's own close still counts
+    assert not s.connected
+
+
+def test_disconnected_and_silent_for_long_is_rebuilt():
+    e = Env(stale_s=10).up()
+    s = e.stream
+    s.on_reconnect(1)                                 # KiteTicker retrying on its own
+    e.clock.t += 30
+    s.check()
+    assert len(e.transports) == 1                     # give its own reconnect a chance first
+    e.clock.t += 31
+    s.check()
+    assert len(e.transports) == 2 and e.transports[0].closed
